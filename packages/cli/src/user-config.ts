@@ -1,3 +1,6 @@
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import Conf from "conf";
 
 import { AI_PROVIDERS, type AiProvider } from "./providers.js";
@@ -80,17 +83,62 @@ export interface UserConfigStore {
   allowlist(): string[];
 }
 
+export interface OpenUserConfigOptions {
+  /** Use this directory instead of the default (see configDir). */
+  dir?: string;
+  /** For tests: the environment, home directory and platform to resolve against. */
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  platform?: NodeJS.Platform;
+}
+
 /**
- * Opens the user config. `dir` overrides the OS config directory (also
- * settable with TRIBUTARY_CONFIG_DIR, e.g. for CI).
+ * Where the config lives: TRIBUTARY_CONFIG_DIR if set, else
+ * $XDG_CONFIG_HOME/tributary or ~/.config/tributary on macOS and Linux
+ * alike, and %APPDATA%\tributary on Windows.
  */
-export function openUserConfig(options: { dir?: string } = {}): UserConfigStore {
-  const dir = options.dir ?? process.env.TRIBUTARY_CONFIG_DIR;
+export function configDir(env: NodeJS.ProcessEnv, home: string, platform: NodeJS.Platform): string {
+  if (env.TRIBUTARY_CONFIG_DIR) return env.TRIBUTARY_CONFIG_DIR;
+  if (platform === "win32")
+    return join(env.APPDATA ?? join(home, "AppData", "Roaming"), "tributary");
+  const xdg = env.XDG_CONFIG_HOME;
+  return join(xdg && isAbsolute(xdg) ? xdg : join(home, ".config"), "tributary");
+}
+
+/** Before 0.1.0, macOS settings lived in ~/Library/Preferences; move them once. */
+function migrateLegacyMacConfig(home: string, dir: string): void {
+  const legacyDir = join(home, "Library", "Preferences", "tributary");
+  const legacy = join(legacyDir, "config.json");
+  const current = join(dir, "config.json");
+  if (!existsSync(legacy) || existsSync(current)) return;
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  copyFileSync(legacy, current);
+  rmSync(legacyDir, { recursive: true, force: true });
+}
+
+/**
+ * Opens the user config. The file holds connection passwords and API
+ * keys in plaintext, so it's kept owner-only: the directory 0700, the
+ * file 0600 (tightened if an older file was created looser).
+ */
+export function openUserConfig(options: OpenUserConfigOptions = {}): UserConfigStore {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const platform = options.platform ?? process.platform;
+  const dir = options.dir ?? configDir(env, home, platform);
+  if (!options.dir && platform === "darwin" && !env.TRIBUTARY_CONFIG_DIR)
+    migrateLegacyMacConfig(home, dir);
+
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const conf = new Conf<UserConfig>({
     projectName: "tributary",
-    projectSuffix: "",
-    ...(dir && { cwd: dir }),
+    cwd: dir,
+    configFileMode: 0o600,
   });
+  if (platform !== "win32") {
+    chmodSync(dir, 0o700);
+    if (existsSync(conf.path)) chmodSync(conf.path, 0o600);
+  }
 
   return {
     path: conf.path,
