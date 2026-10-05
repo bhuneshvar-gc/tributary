@@ -19,11 +19,19 @@ import {
   type Traversal,
 } from "@bhuneshvar-k/tributary-core";
 import * as p from "@clack/prompts";
+import type { LanguageModel } from "ai";
 import Table from "cli-table3";
 import { Command, Option } from "commander";
 import pc from "picocolors";
 import semver from "semver";
-import { createModel, generateCommand, toCliArgs } from "./ai.js";
+import {
+  type AiCommand,
+  createModel,
+  type GeneratedCommand,
+  generateCommand,
+  type Turn,
+  toCliArgs,
+} from "./ai.js";
 import { findSchemaFile, loadRunSchema, relabel } from "./schema-file.js";
 import {
   type AvailableUpdate,
@@ -32,7 +40,7 @@ import {
   npmUpdateSource,
   type UpdateSource,
 } from "./update-check.js";
-import { openUserConfig, type UserConfigStore } from "./user-config.js";
+import { openUserConfig, type UserConfig, type UserConfigStore } from "./user-config.js";
 
 // Both src/ and dist/ sit one level below the package root.
 const { name: packageName, version } = createRequire(import.meta.url)("../package.json") as {
@@ -50,6 +58,15 @@ export interface ProgramContext {
    * (not a terminal: CI, pipes), so commands fail with a hint instead.
    */
   confirm?: (message: string) => Promise<boolean>;
+  /** Picks one of `choices` (by value); undefined if cancelled. Absent like `confirm`. */
+  choose?: (
+    message: string,
+    choices: { value: string; label: string }[],
+  ) => Promise<string | undefined>;
+  /** Asks for a line of text; undefined if cancelled. Absent like `confirm`. */
+  ask?: (message: string) => Promise<string | undefined>;
+  /** The AI model for `tributary ai` (default: the one configured with ai.*). */
+  model?: (ai: UserConfig["ai"]) => LanguageModel;
   /** Where new versions are looked up and installed from. */
   updates: UpdateSource;
   /** Shows what a long command is doing; absent when stderr isn't a terminal. */
@@ -86,11 +103,22 @@ function describeProgress(event: SubsetProgress): string {
 }
 
 /** A y/N prompt on the terminal, or undefined when stdin/stderr aren't one. */
-function terminalConfirm(): ProgramContext["confirm"] {
+/** Yes/no, menu and text prompts on the terminal, or undefined when stdin/stderr aren't one. */
+function terminalPrompts(): Pick<ProgramContext, "confirm" | "choose" | "ask"> | undefined {
   if (!process.stdin.isTTY || !process.stderr.isTTY) return undefined;
-  return async (message) => {
-    const answer = await p.confirm({ message, initialValue: false, output: process.stderr });
-    return !p.isCancel(answer) && answer;
+  return {
+    async confirm(message) {
+      const answer = await p.confirm({ message, initialValue: false, output: process.stderr });
+      return !p.isCancel(answer) && answer;
+    },
+    async choose(message, choices) {
+      const answer = await p.select({ message, options: choices, output: process.stderr });
+      return p.isCancel(answer) ? undefined : String(answer);
+    },
+    async ask(message) {
+      const answer = await p.text({ message, output: process.stderr });
+      return p.isCancel(answer) ? undefined : answer;
+    },
   };
 }
 
@@ -405,43 +433,94 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
       ) => {
         ctx.progress?.("reading the source schema");
         const db = await inspectSource(ctx, opts.source);
-        ctx.progress?.("asking the model");
         const ai = ctx.userConfig.all().ai;
-        const generated = await generateCommand(createModel(ai), words.join(" "), db, {
-          canSync: opts.target !== undefined,
-          ...(ai?.maxPromptTokens && { maxPromptTokens: ai.maxPromptTokens }),
-        });
+        const model = (ctx.model ?? createModel)(ai);
+        const history: Turn[] = [];
+        let request = words.join(" ");
 
-        const { command, usage } = generated;
-        const args = toCliArgs(command, opts);
-        const warnings = command.warnings.map((w) => pc.yellow(`! ${w}`)).join("\n");
-        p.note(
-          [
-            `tributary ${args.map(shellQuote).join(" ")}`,
-            "",
-            command.explanation,
-            ...(warnings ? ["", warnings] : []),
-          ].join("\n"),
-          "Generated command",
-          { output: process.stderr },
-        );
-        ctx.stderr(
-          `${pc.dim(`ai: ${usage.inputTokens.toLocaleString("en-US")} tokens in, ${usage.outputTokens.toLocaleString("en-US")} out, ${usage.steps} step${usage.steps === 1 ? "" : "s"}`)}\n`,
-        );
-        if (opts.dryRun) return;
-        if (command.command === "sync" && !opts.yes) {
-          if (!ctx.confirm)
-            throw new Error(
-              "not at a terminal, so nobody can confirm the sync: pass --yes to run it",
-            );
-          if (!(await ctx.confirm("This writes to the target database. Run it?"))) {
-            p.cancel("Not run.");
-            return;
+        // Generate, show, then run / follow up / cancel, until run or cancel.
+        for (;;) {
+          ctx.progress?.("asking the model");
+          const { command, usage } = await generateCommand(model, request, db, {
+            canSync: opts.target !== undefined,
+            history,
+            ...(ai?.maxPromptTokens && { maxPromptTokens: ai.maxPromptTokens }),
+          });
+          const args = toCliArgs(command, opts);
+          printGenerated(ctx, args, command, usage);
+          if (opts.dryRun) return;
+
+          if (!opts.yes) {
+            if (!ctx.choose) {
+              // No terminal: read-only commands run as before; a sync needs --yes.
+              if (command.command === "sync") {
+                throw new Error(
+                  "not at a terminal, so nobody can confirm the sync: pass --yes to run it",
+                );
+              }
+            } else {
+              const next = await nextStep(ctx, command);
+              if (next.kind === "follow-up") {
+                history.push({ request, command });
+                request = next.change;
+                continue;
+              }
+              if (next.kind === "cancel") {
+                ctx.stderr("Not run.\n");
+                return;
+              }
+            }
           }
+          await createProgram(ctx).parseAsync(args, { from: "user" });
+          return;
         }
-        await createProgram(ctx).parseAsync(args, { from: "user" });
       },
     );
+}
+
+/**
+ * Asks what to do with a generated command until the answer is final: an
+ * empty follow-up just asks again, without another model call.
+ */
+async function nextStep(
+  ctx: ProgramContext,
+  command: AiCommand,
+): Promise<{ kind: "run" } | { kind: "cancel" } | { kind: "follow-up"; change: string }> {
+  const choices = [
+    {
+      value: "run",
+      label: command.command === "sync" ? "Run it (writes to the target database)" : "Run it",
+    },
+    { value: "follow-up", label: "Follow up: change something" },
+    { value: "cancel", label: "Cancel" },
+  ];
+  for (;;) {
+    const next = await ctx.choose!("What next?", choices);
+    if (next === "run") return { kind: "run" };
+    if (next !== "follow-up") return { kind: "cancel" };
+    const change = (await ctx.ask?.("What should change?"))?.trim();
+    if (change) return { kind: "follow-up", change };
+  }
+}
+
+/** Shows a generated command, the model's explanation and warnings, and the tokens it took. */
+function printGenerated(
+  ctx: ProgramContext,
+  args: string[],
+  command: AiCommand,
+  usage: GeneratedCommand["usage"],
+): void {
+  const lines = [
+    pc.bold("Generated command"),
+    `  tributary ${args.map(shellQuote).join(" ")}`,
+    "",
+    `  ${command.explanation}`,
+    ...command.warnings.map((w) => pc.yellow(`  ! ${w}`)),
+    pc.dim(
+      `  ai: ${usage.inputTokens.toLocaleString("en-US")} tokens in, ${usage.outputTokens.toLocaleString("en-US")} out, ${usage.steps} step${usage.steps === 1 ? "" : "s"}`,
+    ),
+  ];
+  ctx.stderr(`\n${lines.join("\n")}\n\n`);
 }
 
 function shellQuote(arg: string): string {
@@ -496,7 +575,7 @@ function printSync(ctx: ProgramContext, result: SyncResult): void {
 
 /** Runs the CLI, printing errors readably and returning the exit code. */
 export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promise<number> {
-  const confirm = terminalConfirm();
+  const prompts = terminalPrompts();
   const spinner = terminalProgress();
   const context: ProgramContext = {
     cwd: process.cwd(),
@@ -511,7 +590,7 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
       process.stderr.write(s);
     },
     updates: npmUpdateSource(packageName),
-    ...(confirm && { confirm }),
+    ...prompts,
     ...(spinner && { progress: spinner.update }),
     ...ctx,
   };

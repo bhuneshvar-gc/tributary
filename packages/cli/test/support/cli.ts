@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { LanguageModel } from "ai";
 import { run } from "../../src/program.js";
 import type { UpdateSource } from "../../src/update-check.js";
 import { openUserConfig, type UserConfigStore } from "../../src/user-config.js";
@@ -20,17 +21,31 @@ const offline: UpdateSource = {
   },
 };
 
-/**
- * `answers` stands in for a person at the terminal: each confirmation
- * prompt takes the next one. Without it the CLI is non-interactive.
- * `updates` stands in for the npm registry (offline by default).
- */
-export function testCli(
-  cwd = mkdtempSync(join(tmpdir(), "tributary-cli-")),
-  answers?: boolean[],
-  updates: UpdateSource = offline,
-  progress?: (message: string) => void,
-) {
+/** A scripted person at the terminal; each prompt takes the next answer of its kind. */
+export interface Terminal {
+  /** Yes/no questions. */
+  confirms?: boolean[];
+  /** Menu picks, by choice value; undefined cancels. */
+  choices?: (string | undefined)[];
+  /** Typed answers; undefined cancels. */
+  texts?: (string | undefined)[];
+}
+
+export interface TestCliOptions {
+  cwd?: string;
+  /** Omit for a non-interactive CLI (no terminal: CI, pipes). */
+  terminal?: Terminal;
+  /** Stands in for the npm registry (offline by default). */
+  updates?: UpdateSource;
+  progress?: (message: string) => void;
+  /** Stands in for the configured AI model. */
+  model?: LanguageModel;
+}
+
+export function testCli(options: TestCliOptions = {}) {
+  const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "tributary-cli-"));
+  const { terminal, progress, model } = options;
+  const updates = options.updates ?? offline;
   const prompts: string[] = [];
   const userConfig: UserConfigStore = openUserConfig({
     dir: mkdtempSync(join(tmpdir(), "tributary-config-")),
@@ -38,7 +53,7 @@ export function testCli(
   return {
     cwd,
     userConfig,
-    /** Every confirmation question asked so far. */
+    /** Every question asked so far, of any kind. */
     prompts,
     async run(...argv: string[]): Promise<CliResult> {
       let stdout = "";
@@ -48,10 +63,19 @@ export function testCli(
         userConfig,
         updates,
         ...(progress && { progress }),
-        ...(answers && {
+        ...(model && { model: () => model }),
+        ...(terminal && {
           confirm: async (message: string) => {
             prompts.push(message);
-            return answers.shift() ?? false;
+            return terminal.confirms?.shift() ?? false;
+          },
+          choose: async (message: string) => {
+            prompts.push(message);
+            return terminal.choices?.shift();
+          },
+          ask: async (message: string) => {
+            prompts.push(message);
+            return terminal.texts?.shift();
           },
         }),
         stdout: (s) => {

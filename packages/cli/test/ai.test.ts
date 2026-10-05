@@ -262,6 +262,25 @@ describe("generateCommand", () => {
     expect(model.doGenerateCalls[0]!.toolChoice).toEqual({ type: "required" });
   });
 
+  test("a follow-up sends the earlier requests and commands, but not their lookup results", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: [submit("1", { ...plan, where: "id = 2" })],
+    });
+
+    const result = await generateCommand(model, "use id 2 instead", schema, {
+      history: [
+        { request: "preview user 1", command: parseAiCommand({ ...plan, where: "id = 1" }) },
+      ],
+    });
+
+    expect(result.command.where).toBe("id = 2");
+    const sent = JSON.stringify(model.doGenerateCalls[0]!.prompt);
+    expect(sent).toContain("preview user 1");
+    expect(sent).toContain("id = 1");
+    expect(sent).toContain("use id 2 instead");
+    expect(sent).not.toContain("tool-result");
+  });
+
   test("stops at the token cap instead of exploring forever", async () => {
     const model = new MockLanguageModelV4({
       doGenerate: Array.from({ length: 10 }, (_, i) => ({

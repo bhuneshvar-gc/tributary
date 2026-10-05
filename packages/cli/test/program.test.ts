@@ -35,10 +35,12 @@ test("an unknown connection name is reported with the exit code", async () => {
 describe("update notices", () => {
   function cliWithRegistry(latest: string | undefined) {
     const installs: string[] = [];
-    const cli = testCli(undefined, undefined, {
-      fetchLatest: async () => latest,
-      install: async (spec) => {
-        installs.push(spec);
+    const cli = testCli({
+      updates: {
+        fetchLatest: async () => latest,
+        install: async (spec) => {
+          installs.push(spec);
+        },
       },
     });
     return { cli, installs };
@@ -81,10 +83,12 @@ describe("update notices", () => {
 describe("tributary update", () => {
   test("installs the latest version when there's a newer one", async () => {
     const installs: string[] = [];
-    const cli = testCli(undefined, undefined, {
-      fetchLatest: async () => "9.0.0",
-      install: async (spec) => {
-        installs.push(spec);
+    const cli = testCli({
+      updates: {
+        fetchLatest: async () => "9.0.0",
+        install: async (spec) => {
+          installs.push(spec);
+        },
       },
     });
 
@@ -98,10 +102,12 @@ describe("tributary update", () => {
 
   test("says so when already up to date", async () => {
     const installs: string[] = [];
-    const cli = testCli(undefined, undefined, {
-      fetchLatest: async () => pkg.version,
-      install: async (spec) => {
-        installs.push(spec);
+    const cli = testCli({
+      updates: {
+        fetchLatest: async () => pkg.version,
+        install: async (spec) => {
+          installs.push(spec);
+        },
       },
     });
 
@@ -112,9 +118,11 @@ describe("tributary update", () => {
   });
 
   test("an unreachable registry is an error", async () => {
-    const cli = testCli(undefined, undefined, {
-      fetchLatest: async () => undefined,
-      install: async () => {},
+    const cli = testCli({
+      updates: {
+        fetchLatest: async () => undefined,
+        install: async () => {},
+      },
     });
 
     const result = await cli.run("update");

@@ -1,5 +1,5 @@
 import { type Schema, TRAVERSALS } from "@bhuneshvar-k/tributary-core";
-import { generateText, type LanguageModel, stepCountIs, tool } from "ai";
+import { generateText, type LanguageModel, type ModelMessage, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { PROVIDERS, type ProviderSpec } from "./providers.js";
 import { schemaTools } from "./schema-tools.js";
@@ -124,6 +124,27 @@ export const DEFAULT_MAX_PROMPT_TOKENS = 20_000;
 /** At most this many model calls (lookups plus the answer) per request. */
 const MAX_STEPS = 8;
 
+/** One earlier round: what was asked and the command it produced. */
+export interface Turn {
+  request: string;
+  command: AiCommand;
+}
+
+/**
+ * The messages for a request after earlier rounds. Only requests and the
+ * commands they produced are kept, not the lookups behind them, so a
+ * follow-up costs about as much as the first request.
+ */
+function conversation(history: Turn[], request: string): ModelMessage[] {
+  return [
+    ...history.flatMap((turn): ModelMessage[] => [
+      { role: "user", content: turn.request },
+      { role: "assistant", content: `I submitted this command:\n${JSON.stringify(turn.command)}` },
+    ]),
+    { role: "user", content: request },
+  ];
+}
+
 export interface GeneratedCommand {
   command: AiCommand;
   usage: { inputTokens: number; outputTokens: number; steps: number };
@@ -139,7 +160,12 @@ export async function generateCommand(
   model: LanguageModel,
   request: string,
   catalog: Schema,
-  options: { canSync?: boolean; maxPromptTokens?: number } = {},
+  options: {
+    canSync?: boolean;
+    maxPromptTokens?: number;
+    /** Earlier rounds of this conversation, oldest first, for a follow-up request. */
+    history?: Turn[];
+  } = {},
 ): Promise<GeneratedCommand> {
   const cap = options.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
   const lookups = schemaTools(catalog);
@@ -150,7 +176,7 @@ export async function generateCommand(
   const result = await generateText({
     model,
     system: buildSystemPrompt(options),
-    prompt: request,
+    messages: conversation(options.history ?? [], request),
     tools: {
       search_tables: tool({
         description: "Find tables whose name or columns match the words in query.",

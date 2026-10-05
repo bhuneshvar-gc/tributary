@@ -34,7 +34,7 @@ tables:
 
 /** A CLI with a "src" connection to the fixture database. */
 function cliWithSource(answers?: boolean[]) {
-  const cli = testCli(undefined, answers);
+  const cli = testCli(answers ? { terminal: { confirms: answers } } : {});
   cli.userConfig.set("connections.src.url", source.url);
   return cli;
 }
@@ -401,7 +401,7 @@ describe("schema validate", () => {
 
 test("plan shows its progress while collecting the subset", async () => {
   const progress: string[] = [];
-  const cli = testCli(undefined, undefined, undefined, (m) => progress.push(m));
+  const cli = testCli({ progress: (m) => progress.push(m) });
   cli.userConfig.set("connections.src.url", source.url);
 
   const result = await cli.run(

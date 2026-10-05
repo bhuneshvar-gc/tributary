@@ -124,7 +124,13 @@ Nothing installs unless you run it. Turn the check off with
   refuses to sync a database into itself: matched by server start time and database
   identity (so a pooler and a direct connection to the same database still match),
   and by cluster system identifier where the role can read it (catching a replica).
-- `tributary ai` shows the generated command and asks before any sync (`--yes` skips).
+- `tributary ai` shows the generated command and asks what next: **Run it**, **Follow up**
+  (type a change, e.g. "use the unilever schema", and get a revised command, as many
+  rounds as you like), or **Cancel**. `--yes` runs without asking; `--dry-run` only shows
+  the command. With no terminal (CI, pipes), read-only commands run and a sync needs
+  `--yes`. The model looks up only the tables it needs (it never receives the whole
+  schema), each round prints its token usage, and `ai.maxPromptTokens` (default 20,000)
+  caps one round.
 - The local config file stores connection strings and API keys in **plaintext**.
   Keep it out of shared machines and backups you don't control.
 
