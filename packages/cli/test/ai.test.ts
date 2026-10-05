@@ -1,6 +1,13 @@
 import type { Schema } from "@bhuneshvar-k/tributary-core";
+import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, test } from "vitest";
-import { buildSystemPrompt, createModel, parseAiCommand, toCliArgs } from "../src/ai.js";
+import {
+  buildSystemPrompt,
+  createModel,
+  generateCommand,
+  parseAiCommand,
+  toCliArgs,
+} from "../src/ai.js";
 
 const schema: Schema = {
   tables: [
@@ -49,21 +56,17 @@ const schema: Schema = {
 };
 
 describe("buildSystemPrompt", () => {
-  test("describes the commands even without a schema", () => {
+  test("describes the commands and the schema tools, without any schema in it", () => {
     const prompt = buildSystemPrompt();
     expect(prompt).toContain('"plan"');
     expect(prompt).toContain('"sync"');
-    expect(prompt).not.toContain("Database schema");
+    expect(prompt).toContain("search_tables");
+    expect(prompt).toContain("describe_table");
+    expect(prompt).not.toContain("public.users");
   });
 
-  test("lists tables, keys, columns, foreign keys and enums", () => {
-    const prompt = buildSystemPrompt(schema);
-    expect(prompt).toContain("Database schema");
-    expect(prompt).toContain("public.users (primary key: id)");
-    expect(prompt).toContain("- email: text, nullable");
-    expect(prompt).toContain("- id: integer\n");
-    expect(prompt).toContain("company_id -> public.companies.id");
-    expect(prompt).toContain("user_role: admin, member");
+  test("stays small however large the database is", () => {
+    expect(buildSystemPrompt().length).toBeLessThan(4_000);
   });
 });
 
@@ -166,10 +169,10 @@ describe("createModel", () => {
 
 describe("sync availability", () => {
   test("without a target the model is told sync isn't available", () => {
-    expect(buildSystemPrompt(schema, { canSync: false })).toContain(
+    expect(buildSystemPrompt({ canSync: false })).toContain(
       '"sync" is not available: no --target was given. Use "plan" instead',
     );
-    expect(buildSystemPrompt(schema)).not.toContain("not available");
+    expect(buildSystemPrompt()).not.toContain("not available");
   });
 
   test("CLI args carry the source, schema file and target", () => {
@@ -196,5 +199,82 @@ describe("sync availability", () => {
     expect(
       toCliArgs({ ...command, command: "inspect" }, { source: "prod", target: "local" }),
     ).toEqual(["inspect", "--source", "prod"]);
+  });
+});
+
+describe("generateCommand", () => {
+  const usage = (input: number, output = 20) => ({
+    inputTokens: { total: input, noCache: input, cacheRead: undefined, cacheWrite: undefined },
+    outputTokens: { total: output, text: output, reasoning: undefined },
+  });
+  const toolCall = (id: string, toolName: string, input: object) => ({
+    content: [
+      { type: "tool-call" as const, toolCallId: id, toolName, input: JSON.stringify(input) },
+    ],
+    finishReason: { unified: "tool-calls" as const, raw: undefined },
+    usage: usage(1_000),
+    warnings: [],
+  });
+  const submit = (id: string, command: object) => ({
+    ...toolCall(id, "submit_command", command),
+    usage: usage(1_500, 80),
+  });
+  const plan = {
+    command: "plan",
+    seedTable: "public.users",
+    where: "email = 'a@b.co'",
+    traversal: null,
+    fresh: null,
+    explanation: "preview that user",
+    warnings: [],
+  };
+
+  test("the model looks tables up with tools, then answers; usage is summed", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: [toolCall("1", "search_tables", { query: "users" }), submit("2", plan)],
+    });
+
+    const result = await generateCommand(model, "preview the user a@b.co", schema);
+
+    expect(result.command).toMatchObject({ command: "plan", seedTable: "public.users" });
+    expect(result.usage).toEqual({ inputTokens: 2_500, outputTokens: 100, steps: 2 });
+    const toolResult = JSON.stringify(model.doGenerateCalls[1]!.prompt);
+    expect(toolResult).toContain("users");
+    expect(toolResult).toContain('"schemas":["public"]');
+  });
+
+  test("an invalid submission is sent back as an error, and the corrected one is used", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: [submit("1", { ...plan, seedTable: null, where: null }), submit("2", plan)],
+    });
+
+    const result = await generateCommand(model, "preview the user a@b.co", schema);
+
+    expect(result.command.seedTable).toBe("public.users");
+    expect(JSON.stringify(model.doGenerateCalls[1]!.prompt)).toContain(
+      "plan needs a seed table and a where predicate",
+    );
+  });
+
+  test("every step must be a tool call, so the model can't answer without looking", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: [submit("1", plan)] });
+    await generateCommand(model, "anything", schema);
+    expect(model.doGenerateCalls[0]!.toolChoice).toEqual({ type: "required" });
+  });
+
+  test("stops at the token cap instead of exploring forever", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: Array.from({ length: 10 }, (_, i) => ({
+        ...toolCall(String(i), "describe_table", { table: "public.users" }),
+        usage: usage(4_000),
+      })),
+    });
+
+    await expect(
+      generateCommand(model, "anything", schema, { maxPromptTokens: 10_000 }),
+    ).rejects.toThrow(
+      /stopped at the token cap \(10,000 input tokens\).*tributary config set ai\.maxPromptTokens/,
+    );
+    expect(model.doGenerateCalls.length).toBe(3);
   });
 });

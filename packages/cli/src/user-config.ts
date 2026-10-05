@@ -19,6 +19,8 @@ export interface UserConfig {
     model?: string;
     apiKey?: string;
     baseUrl?: string;
+    /** Input tokens one `tributary ai` request may use in total. */
+    maxPromptTokens?: number;
   };
   /** Update notices; on unless `check` is false. */
   updates?: { check?: boolean };
@@ -60,6 +62,17 @@ const KEYS: KeySpec[] = [
     pattern: /^ai\.(model|apiKey|baseUrl)$/,
     example: "ai.model | ai.apiKey | ai.baseUrl",
     parse: (s) => s,
+  },
+  {
+    pattern: /^ai\.maxPromptTokens$/,
+    example: "ai.maxPromptTokens",
+    parse: (s) => {
+      const n = Number(s);
+      if (!Number.isInteger(n) || n < 1_000) {
+        throw new Error("ai.maxPromptTokens must be a whole number of at least 1000");
+      }
+      return n;
+    },
   },
   {
     pattern: /^updates\.check$/,

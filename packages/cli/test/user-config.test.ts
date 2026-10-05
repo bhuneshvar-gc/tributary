@@ -44,6 +44,13 @@ describe("user config", () => {
     expect(() => store.set("ai.provider", "skynet")).toThrow(/ai\.provider must be one of/);
   });
 
+  test("ai.maxPromptTokens takes a whole number of at least 1000", () => {
+    store.set("ai.maxPromptTokens", "30000");
+    expect(store.get("ai.maxPromptTokens")).toBe(30_000);
+    expect(() => store.set("ai.maxPromptTokens", "lots")).toThrow(/whole number of at least 1000/);
+    expect(() => store.set("ai.maxPromptTokens", "10")).toThrow(/at least 1000/);
+  });
+
   test("unset removes a key", () => {
     store.set("ai.model", "x");
     store.unset("ai.model");

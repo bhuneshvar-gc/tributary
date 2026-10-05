@@ -20,7 +20,9 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prebuild": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "postbuild": "node -e \"require('fs').chmodSync('dist/bin.js', 0o755)\""
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.71",

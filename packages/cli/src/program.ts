@@ -403,24 +403,16 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
         words: string[],
         opts: { source: string; target?: string; schema?: string; yes?: boolean; dryRun?: boolean },
       ) => {
-        const spinner = p.spinner({ output: process.stderr });
-        spinner.start("Reading the source schema");
-        let command: Awaited<ReturnType<typeof generateCommand>>;
-        try {
-          const db = await inspectSource(ctx, opts.source);
-          spinner.message("Asking the model");
-          command = await generateCommand(
-            createModel(ctx.userConfig.all().ai),
-            words.join(" "),
-            db,
-            {
-              canSync: opts.target !== undefined,
-            },
-          );
-        } finally {
-          spinner.stop();
-        }
+        ctx.progress?.("reading the source schema");
+        const db = await inspectSource(ctx, opts.source);
+        ctx.progress?.("asking the model");
+        const ai = ctx.userConfig.all().ai;
+        const generated = await generateCommand(createModel(ai), words.join(" "), db, {
+          canSync: opts.target !== undefined,
+          ...(ai?.maxPromptTokens && { maxPromptTokens: ai.maxPromptTokens }),
+        });
 
+        const { command, usage } = generated;
         const args = toCliArgs(command, opts);
         const warnings = command.warnings.map((w) => pc.yellow(`! ${w}`)).join("\n");
         p.note(
@@ -432,6 +424,9 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
           ].join("\n"),
           "Generated command",
           { output: process.stderr },
+        );
+        ctx.stderr(
+          `${pc.dim(`ai: ${usage.inputTokens.toLocaleString("en-US")} tokens in, ${usage.outputTokens.toLocaleString("en-US")} out, ${usage.steps} step${usage.steps === 1 ? "" : "s"}`)}\n`,
         );
         if (opts.dryRun) return;
         if (command.command === "sync" && !opts.yes) {

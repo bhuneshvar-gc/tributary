@@ -1,34 +1,35 @@
 import { type Schema, TRAVERSALS } from "@bhuneshvar-k/tributary-core";
-import { generateText, type LanguageModel, Output } from "ai";
+import { generateText, type LanguageModel, stepCountIs, tool } from "ai";
 import { z } from "zod";
 import { PROVIDERS, type ProviderSpec } from "./providers.js";
+import { schemaTools } from "./schema-tools.js";
 import type { UserConfig } from "./user-config.js";
 
 /**
- * What the model must return. Optional fields are nullable rather than
- * omittable, since strict structured-output modes require every key.
+ * The command the model submits. Optional fields are nullable rather than
+ * omittable, since strict tool-input modes require every key.
  */
-export const aiCommandSchema = z
-  .object({
-    command: z.enum(["inspect", "plan", "sync"]),
-    seedTable: z
-      .string()
-      .nullish()
-      .describe("Seed table, unqualified unless the user names a schema"),
-    where: z.string().nullish().describe("Raw SQL WHERE fragment selecting the seed rows"),
-    traversal: z.enum(TRAVERSALS).nullish(),
-    fresh: z.boolean().nullish(),
-    explanation: z.string().describe("One or two sentences on what the command does"),
-    warnings: z.array(z.string()).describe("Assumptions made and caveats"),
-  })
-  .superRefine((c, ctx) => {
-    if (c.command !== "inspect" && (!c.seedTable || !c.where)) {
-      ctx.addIssue({
-        code: "custom",
-        message: `${c.command} needs a seed table and a where predicate`,
-      });
-    }
-  });
+const commandFields = z.object({
+  command: z.enum(["inspect", "plan", "sync"]),
+  seedTable: z
+    .string()
+    .nullish()
+    .describe("Seed table, unqualified unless the user names a schema"),
+  where: z.string().nullish().describe("Raw SQL WHERE fragment selecting the seed rows"),
+  traversal: z.enum(TRAVERSALS).nullish(),
+  fresh: z.boolean().nullish(),
+  explanation: z.string().describe("One or two sentences on what the command does"),
+  warnings: z.array(z.string()).describe("Assumptions made and caveats"),
+});
+
+export const aiCommandSchema = commandFields.superRefine((c, ctx) => {
+  if (c.command !== "inspect" && (!c.seedTable || !c.where)) {
+    ctx.addIssue({
+      code: "custom",
+      message: `${c.command} needs a seed table and a where predicate`,
+    });
+  }
+});
 
 export type AiCommand = z.output<typeof aiCommandSchema>;
 
@@ -64,7 +65,7 @@ export function toCliArgs(c: AiCommand, ctx: CommandContext): string[] {
   return args;
 }
 
-export function buildSystemPrompt(schema?: Schema, options: { canSync?: boolean } = {}): string {
+export function buildSystemPrompt(options: { canSync?: boolean } = {}): string {
   const lines = [
     "You are Tributary AI. Tributary copies referentially-consistent subsets of a Postgres",
     "database: starting from seed rows, it follows foreign keys to every row that must travel",
@@ -75,44 +76,27 @@ export function buildSystemPrompt(schema?: Schema, options: { canSync?: boolean 
     '- "plan": preview a subset (row counts per table) without writing anything.',
     '- "sync": copy the subset into the target database.',
     "",
+    "Finding tables (the schema is not included here; look up only what you need):",
+    "- search_tables(query): tables whose name or columns match the words in query.",
+    "- describe_table(table): one table's primary key, columns and foreign keys.",
+    "- list_schemas(): every schema with its table count.",
+    "- Many schemas can hold identical copies of a table (one per tenant). If the user names a",
+    "  tenant or schema, use that schema; otherwise ask for it in warnings and pick the likeliest.",
+    "- Use as few lookups as you need, usually one search and one or two describes.",
+    "",
     "Rules:",
     '- plan and sync need seedTable and where. where is a raw SQL WHERE fragment, e.g. "id = 42".',
-    "- Use unqualified table names unless the user names a schema.",
+    '- seedTable is "schema.table". Only use tables and columns you have looked up.',
     '- "sync", "copy", "load" or "migrate" means sync; "preview", "how many" or "what would" means plan.',
     '- traversal "full" also fans out from parent rows (e.g. a user\'s whole company). Only use it',
     "  if the user asks for related data beyond the seed's own. Otherwise leave it null.",
     "- fresh deletes previously loaded subset rows first. Only set it if the user asks for a clean reload.",
-    "- Only use tables and columns from the schema below. If the user's table or column doesn't",
-    "  exist, pick the closest match and say so in warnings.",
     "- If the request is ambiguous, pick the most likely intent and state the assumption in warnings.",
   ];
-
   if (options.canSync === false) {
     lines.push(
       '- "sync" is not available: no --target was given. Use "plan" instead, and say so in warnings.',
     );
-  }
-
-  if (schema?.tables.length) {
-    lines.push("", "Database schema:");
-    for (const t of schema.tables) {
-      const pk = t.primaryKey.length
-        ? ` (primary key: ${t.primaryKey.join(", ")})`
-        : " (no primary key)";
-      lines.push(`${t.schema}.${t.name}${pk}`);
-      for (const c of t.columns)
-        lines.push(`  - ${c.name}: ${c.sqlType}${c.nullable ? ", nullable" : ""}`);
-      for (const fk of t.foreignKeys) {
-        lines.push(
-          `  references: ${fk.fromColumns.join(", ")} -> ${fk.toTable}.${fk.toColumns.join(", ")}`,
-        );
-      }
-    }
-    const enums = Object.entries(schema.enums);
-    if (enums.length) {
-      lines.push("", "Enum types:");
-      for (const [name, labels] of enums) lines.push(`  ${name}: ${labels.join(", ")}`);
-    }
   }
   return `${lines.join("\n")}\n`;
 }
@@ -134,18 +118,94 @@ export function createModel(ai: UserConfig["ai"] = {}): LanguageModel {
 }
 
 /** Asks the model to turn a natural-language request into a command. */
+/** Default for ai.maxPromptTokens: input tokens one `tributary ai` request may use in total. */
+export const DEFAULT_MAX_PROMPT_TOKENS = 20_000;
+
+/** At most this many model calls (lookups plus the answer) per request. */
+const MAX_STEPS = 8;
+
+export interface GeneratedCommand {
+  command: AiCommand;
+  usage: { inputTokens: number; outputTokens: number; steps: number };
+}
+
+/**
+ * Asks the model to turn a natural-language request into a command. The
+ * model looks the schema up through tools instead of receiving all of it,
+ * and the whole exchange stops once it has used `maxPromptTokens` input
+ * tokens, so a large database can't make one request expensive.
+ */
 export async function generateCommand(
   model: LanguageModel,
   request: string,
-  schema?: Schema,
-  options: { canSync?: boolean } = {},
-): Promise<AiCommand> {
-  const { output } = await generateText({
+  catalog: Schema,
+  options: { canSync?: boolean; maxPromptTokens?: number } = {},
+): Promise<GeneratedCommand> {
+  const cap = options.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
+  const lookups = schemaTools(catalog);
+  const inputTokens = (steps: { usage: { inputTokens?: number | undefined } }[]) =>
+    steps.reduce((n, s) => n + (s.usage.inputTokens ?? 0), 0);
+
+  let submitted: AiCommand | undefined;
+  const result = await generateText({
     model,
-    system: buildSystemPrompt(schema, options),
+    system: buildSystemPrompt(options),
     prompt: request,
-    output: Output.object({ schema: aiCommandSchema }),
+    tools: {
+      search_tables: tool({
+        description: "Find tables whose name or columns match the words in query.",
+        inputSchema: z.object({ query: z.string() }),
+        execute: async ({ query }) => lookups.searchTables(query),
+      }),
+      describe_table: tool({
+        description:
+          'Primary key, columns and foreign keys of one table ("schema.table" or a bare name).',
+        inputSchema: z.object({ table: z.string() }),
+        execute: async ({ table }) => lookups.describeTable(table),
+      }),
+      list_schemas: tool({
+        description: "Every schema with its number of tables.",
+        inputSchema: z.object({}),
+        execute: async () => lookups.listSchemas(),
+      }),
+      submit_command: tool({
+        description:
+          "Submit the final command once you know the table and predicate. Call this to finish.",
+        inputSchema: commandFields,
+        execute: async (input) => {
+          try {
+            submitted = parseAiCommand(input);
+            return { accepted: true };
+          } catch (e) {
+            return { accepted: false, error: (e as Error).message };
+          }
+        },
+      }),
+    },
+    // Every step is a tool call, so the model can't answer before looking
+    // anything up; it finishes by submitting a valid command.
+    toolChoice: "required",
+    stopWhen: [
+      () => submitted !== undefined,
+      stepCountIs(MAX_STEPS),
+      ({ steps }) => inputTokens(steps) >= cap,
+    ],
     maxRetries: 3,
   });
-  return parseAiCommand(output);
+
+  const usage = {
+    inputTokens: result.totalUsage.inputTokens ?? 0,
+    outputTokens: result.totalUsage.outputTokens ?? 0,
+    steps: result.steps.length,
+  };
+  if (!submitted) {
+    const why =
+      usage.inputTokens >= cap
+        ? `stopped at the token cap (${cap.toLocaleString("en-US")} input tokens) before it decided`
+        : `stopped after ${MAX_STEPS} steps before it decided`;
+    throw new Error(
+      `the model ${why}; try a more specific request, or raise the cap with tributary config set ai.maxPromptTokens <n>`,
+    );
+  }
+  return { command: submitted, usage };
 }
