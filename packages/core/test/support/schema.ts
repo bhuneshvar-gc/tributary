@@ -16,12 +16,14 @@ export function table(
             name: c,
             type: "integer",
             nullable: true,
+            udtSchema: "pg_catalog",
             udtName: "int4",
             sqlType: "integer",
           }
         : {
             type: "integer",
             nullable: true,
+            udtSchema: "pg_catalog",
             udtName: "int4",
             sqlType: "integer",
             ...c,

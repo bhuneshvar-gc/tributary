@@ -36,7 +36,7 @@ export function checkTargetAllowed(
     throw new TargetNotAllowedError(host);
 }
 
-interface DatabaseIdentity {
+export interface DatabaseIdentity {
   /** Server start time + database oid + name: readable by any role, independent of network path. */
   instance: string;
   /** Cluster system identifier + database name, when the role may read pg_control_system(). */
@@ -48,7 +48,7 @@ interface DatabaseIdentity {
  * (an error would abort a surrounding transaction): the privilege to read
  * the system identifier is checked first.
  */
-async function databaseIdentity(db: Queryable): Promise<DatabaseIdentity> {
+export async function databaseIdentity(db: Queryable): Promise<DatabaseIdentity> {
   const { rows } = await db.query(`
     select pg_postmaster_start_time()::text as started,
       (select oid::text from pg_database where datname = current_database()) as oid,
@@ -70,18 +70,17 @@ async function databaseIdentity(db: Queryable): Promise<DatabaseIdentity> {
  * different addresses (a pooler and a direct connection) or as a replica
  * of the target cluster.
  */
-export async function assertDistinctDatabases(
-  source: Queryable,
-  target: Queryable,
-): Promise<void> {
-  const a = await databaseIdentity(source);
-  const b = await databaseIdentity(target);
+export function assertDifferentDatabases(source: DatabaseIdentity, target: DatabaseIdentity): void {
   if (
-    a.instance === b.instance ||
-    (a.cluster !== null && a.cluster === b.cluster)
+    source.instance === target.instance ||
+    (source.cluster !== null && source.cluster === target.cluster)
   ) {
-    throw new Error(
-      "refusing to sync: source and target are the same database",
-    );
+    throw new Error("refusing to sync: source and target are the same database");
   }
+}
+
+/** assertDifferentDatabases for two connected clients. */
+export async function assertDistinctDatabases(source: Queryable, target: Queryable): Promise<void> {
+  const targetIdentity = await databaseIdentity(target);
+  assertDifferentDatabases(await databaseIdentity(source), targetIdentity);
 }

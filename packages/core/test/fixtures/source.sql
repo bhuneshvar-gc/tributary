@@ -123,3 +123,23 @@ CREATE TABLE cycle_b (
 );
 
 ALTER TABLE cycle_a ADD CONSTRAINT cycle_a_b_fk FOREIGN KEY (b_id) REFERENCES cycle_b(id);
+
+-- Enums outside public, and two same-named enums in different schemas.
+CREATE SCHEMA billing;
+CREATE TYPE billing.invoice_status AS ENUM ('draft', 'paid');
+CREATE TYPE invoice_status AS ENUM ('open', 'closed');
+
+CREATE TABLE billing.invoice (
+    id      int PRIMARY KEY,
+    status  billing.invoice_status NOT NULL,
+    legacy  invoice_status,
+    history billing.invoice_status[]
+);
+
+-- An array of an enum: the enum must be created even though the column is ARRAY.
+CREATE TYPE mood AS ENUM ('happy', 'sad');
+
+CREATE TABLE enum_array_table (
+    id    int PRIMARY KEY,
+    moods mood[] NOT NULL
+);

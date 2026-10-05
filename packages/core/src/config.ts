@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { qualifiedName } from "./catalog.js";
 
 /**
  * One or more columns on a single table. Written in config as
@@ -81,8 +82,9 @@ function toRef(raw: string | string[], ctx: z.RefinementCtx): ColumnRef {
 
 const columnRef = z.union([z.string(), z.array(z.string())]).transform(toRef);
 
+/** The NodeId ("schema.table") a reference points into. */
 export function tableKey(t: { schema: string; table: string }): string {
-  return `${t.schema}.${t.table}`;
+  return qualifiedName(t.schema, t.table);
 }
 
 export function formatRef(r: ColumnRef): string {
@@ -189,6 +191,19 @@ export function qualifyTable(table: string): string {
 
 const qualifiedTable = z.string().min(1).transform(qualifyTable);
 
+/**
+ * "downstream" (default): rows pulled in only as required parents aren't
+ * used to fan back out to their other children. "full": every row fans out.
+ */
+export const TRAVERSALS = ["downstream", "full"] as const;
+
+/** One column of one table, e.g. a dependency break or an applied cycle break. */
+export interface TableColumn {
+  /** "schema.table" */
+  table: string;
+  column: string;
+}
+
 const projectConfigSchema = z
   .object({
     /** Name of a connection in the local user config. */
@@ -217,7 +232,7 @@ const projectConfigSchema = z
      * "downstream" (default): rows pulled in only as required parents aren't
      * used to fan back out to their other children. "full": every row fans out.
      */
-    traversal: z.enum(["downstream", "full"]).default("downstream"),
+    traversal: z.enum(TRAVERSALS).default("downstream"),
     /** Fail on a cycle with no dependency break instead of auto-breaking it. */
     strictCycles: z.boolean().default(false),
   })
@@ -226,7 +241,7 @@ const projectConfigSchema = z
 export type ProjectConfigInput = z.input<typeof projectConfigSchema>;
 export type ProjectConfig = z.output<typeof projectConfigSchema>;
 export type Seed = ProjectConfig["seeds"][number];
-export type DependencyBreak = ProjectConfig["dependencyBreaks"][number];
+export type DependencyBreak = TableColumn;
 export type Traversal = ProjectConfig["traversal"];
 
 /** Identity helper giving tributary.config.ts files type checking. */

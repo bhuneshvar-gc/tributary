@@ -1,10 +1,18 @@
-import { type Schema, type Table, tableId } from "./catalog.js";
-import { ident, literal, type Queryable, qualified } from "./db.js";
+import { customType, findColumn, type Schema, type Table, tableId } from "./catalog.js";
+import {
+  ident,
+  literal,
+  type Queryable,
+  qualified,
+  splitQualified,
+  transaction,
+} from "./db.js";
 import type { NodeId } from "./graph.js";
 import { inspect } from "./inspect.js";
 
 /** What ensureSchema created on the target. */
 export interface SchemaReport {
+  /** "schema.type" names. */
   typesCreated: string[];
   tablesCreated: NodeId[];
   constraintsCreated: string[];
@@ -16,8 +24,9 @@ export interface SchemaReport {
  * are created from the source schema (columns with their exact types,
  * NOT NULL, PRIMARY KEY), and once all of them exist their real FOREIGN
  * KEY constraints are added, so cyclic constraints need no creation
- * order. Missing enum types are created too; other custom types
- * (domains, composites, ranges) must already exist on the target.
+ * order. Missing enum types (including ones only used as array elements)
+ * are created in their own schema; other custom types (domains,
+ * composites, ranges) must already exist on the target.
  *
  * Tables already on the target are checked for compatibility instead of
  * altered. Everything created happens in one transaction.
@@ -38,17 +47,12 @@ export async function ensureSchema(
     warnings: [],
   };
   const sourceTables = new Map(source.tables.map((t) => [tableId(t), t]));
-  const existing = new Map(
-    (await inspect(target)).tables.map((t) => [tableId(t), t]),
-  );
+  const existing = new Map((await inspect(target)).tables.map((t) => [tableId(t), t]));
 
   const missing: Table[] = [];
   for (const id of [...tables].sort()) {
     const src = sourceTables.get(id);
-    if (!src)
-      throw new Error(
-        `internal error: ${id} has rows but is missing from the source schema`,
-      );
+    if (!src) throw new Error(`internal error: ${id} has rows but is missing from the source schema`);
     const tgt = existing.get(id);
     if (tgt) checkCompatible(tgt, src);
     else missing.push(src);
@@ -61,12 +65,14 @@ export async function ensureSchema(
     );
   }
 
-  await target.query("BEGIN");
-  try {
-    report.typesCreated = await ensureTypes(target, source.enums, missing);
-    for (const schemaName of new Set(missing.map((t) => t.schema))) {
-      await target.query(`CREATE SCHEMA IF NOT EXISTS ${ident(schemaName)}`);
-    }
+  await transaction(target, async () => {
+    const types = typesNeeded(missing);
+    const schemas = new Set([
+      ...missing.map((t) => t.schema),
+      ...[...types.keys()].map((type) => splitQualified(type).schema),
+    ]);
+    for (const name of schemas) await target.query(`CREATE SCHEMA IF NOT EXISTS ${ident(name)}`);
+    report.typesCreated = await ensureTypes(target, source.enums, types);
     for (const t of missing) {
       await target.query(createTableSql(t));
       report.tablesCreated.push(tableId(t));
@@ -86,11 +92,7 @@ export async function ensureSchema(
         report.constraintsCreated.push(fk.constraintName);
       }
     }
-    await target.query("COMMIT");
-  } catch (e) {
-    await target.query("ROLLBACK");
-    throw e;
-  }
+  });
   return report;
 }
 
@@ -101,55 +103,53 @@ export async function ensureSchema(
 function checkCompatible(target: Table, source: Table): void {
   const id = tableId(source);
   for (const sc of source.columns) {
-    const tc = target.columns.find((c) => c.name === sc.name);
-    if (!tc)
-      throw new Error(
-        `target table ${id} is missing column "${sc.name}" that the source has`,
-      );
+    const tc = findColumn(target, sc.name);
+    if (!tc) throw new Error(`target table ${id} is missing column "${sc.name}" that the source has`);
     if (sc.nullable && !tc.nullable) {
-      throw new Error(
-        `target table ${id}: column "${sc.name}" is nullable in source but NOT NULL on target`,
-      );
+      throw new Error(`target table ${id}: column "${sc.name}" is nullable in source but NOT NULL on target`);
     }
   }
+}
+
+/** Custom type ("schema.type") -> the first column using it, for error messages. */
+function typesNeeded(tables: Table[]): Map<string, string> {
+  const types = new Map<string, string>();
+  for (const t of tables) {
+    for (const c of t.columns) {
+      const type = customType(c);
+      if (type && !types.has(type)) types.set(type, `${tableId(t)}.${c.name}`);
+    }
+  }
+  return types;
 }
 
 async function ensureTypes(
   target: Queryable,
   enums: Record<string, string[]>,
-  tables: Table[],
-) {
+  types: Map<string, string>,
+): Promise<string[]> {
   const created: string[] = [];
-  const checked = new Set<string>();
-  for (const t of tables) {
-    for (const c of t.columns) {
-      if (c.type !== "USER-DEFINED" || checked.has(c.udtName)) continue;
-      checked.add(c.udtName);
-      const { rows } = await target.query(
-        "SELECT 1 FROM pg_type WHERE typname = $1",
-        [c.udtName],
+  for (const [type, usedBy] of types) {
+    const { schema, name } = splitQualified(type);
+    const { rows } = await target.query(
+      "SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = $1 AND t.typname = $2",
+      [schema, name],
+    );
+    if (rows.length) continue;
+    const labels = enums[type];
+    if (!labels) {
+      throw new Error(
+        `column ${usedBy} uses type "${type}", which doesn't exist on the target and isn't an enum; create it there first (tributary auto-creates enums, not domains, composites or ranges)`,
       );
-      if (rows.length) continue;
-      const labels = enums[c.udtName];
-      if (!labels) {
-        throw new Error(
-          `column ${tableId(t)}.${c.name} uses type "${c.udtName}", which doesn't exist on the target and isn't an enum; create it there first (tributary auto-creates enums, not domains, composites or ranges)`,
-        );
-      }
-      await target.query(
-        `CREATE TYPE ${ident(c.udtName)} AS ENUM (${labels.map(literal).join(", ")})`,
-      );
-      created.push(c.udtName);
     }
+    await target.query(`CREATE TYPE ${qualified(type)} AS ENUM (${labels.map(literal).join(", ")})`);
+    created.push(type);
   }
   return created;
 }
 
 function createTableSql(t: Table): string {
-  const lines = t.columns.map(
-    (c) => `${ident(c.name)} ${c.sqlType}${c.nullable ? "" : " NOT NULL"}`,
-  );
-  if (t.primaryKey.length)
-    lines.push(`PRIMARY KEY (${t.primaryKey.map(ident).join(", ")})`);
+  const lines = t.columns.map((c) => `${ident(c.name)} ${c.sqlType}${c.nullable ? "" : " NOT NULL"}`);
+  if (t.primaryKey.length) lines.push(`PRIMARY KEY (${t.primaryKey.map(ident).join(", ")})`);
   return `CREATE TABLE ${qualified(tableId(t))} (\n  ${lines.join(",\n  ")}\n)`;
 }

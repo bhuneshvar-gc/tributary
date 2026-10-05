@@ -46,6 +46,35 @@ export async function connect(url: string): Promise<pg.Client> {
   return client;
 }
 
+/**
+ * Runs `fn` inside a transaction, committing if it succeeds. A failed
+ * ROLLBACK never hides the error that caused it.
+ */
+export async function transaction<T>(
+  db: Queryable,
+  fn: () => Promise<T>,
+  begin = "BEGIN",
+): Promise<T> {
+  await db.query(begin);
+  try {
+    const result = await fn();
+    await db.query("COMMIT");
+    return result;
+  } catch (e) {
+    await db.query("ROLLBACK").catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Runs `fn` in a READ ONLY, REPEATABLE READ transaction: one consistent
+ * snapshot across every query, and nothing can write. Every query against
+ * a source database goes through this.
+ */
+export function readOnly<T>(db: Queryable, fn: () => Promise<T>): Promise<T> {
+  return transaction(db, fn, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+}
+
 /** Runs `fn` with `source` as a client: an existing one, or a fresh connection closed afterwards. */
 export async function withClient<T>(
   source: string | Queryable,
@@ -64,12 +93,18 @@ export function ident(name: string): string {
   return format.ident(name);
 }
 
-/** Quotes a "schema.table" id as a qualified identifier. */
+/** Quotes a "schema.name" id (a table or type) as a qualified identifier. */
 export function qualified(id: string): string {
+  const { schema, name } = splitQualified(id);
+  return `${ident(schema)}.${ident(name)}`;
+}
+
+/** Splits "schema.name" at its first dot; a bare name is in "public". */
+export function splitQualified(id: string): { schema: string; name: string } {
   const dot = id.indexOf(".");
   return dot === -1
-    ? ident(id)
-    : `${ident(id.slice(0, dot))}.${ident(id.slice(dot + 1))}`;
+    ? { schema: "public", name: id }
+    : { schema: id.slice(0, dot), name: id.slice(dot + 1) };
 }
 
 export function literal(value: string): string {

@@ -15,6 +15,7 @@ function run(
   table: string,
   where: string,
   options: {
+    schema?: string;
     config?: ProjectConfigInput;
     fresh?: boolean;
     createSchema?: boolean;
@@ -24,7 +25,7 @@ function run(
   return sync({
     source: db.source.url,
     target: db.target.url,
-    seeds: [{ table: `public.${table}`, where }],
+    seeds: [{ table: `${options.schema ?? "public"}.${table}`, where }],
     config: parseProjectConfig(options.config ?? {}),
     allowlist: options.allowlist ?? ["127.0.0.1"],
     ...(options.fresh !== undefined && { fresh: options.fresh }),
@@ -77,6 +78,15 @@ test("re-running updates changed rows in place instead of failing or duplicating
   expect(await db.target.query("select * from leaf_table")).toEqual([
     { id: 1, name: "after" },
   ]);
+});
+
+test("re-running a key-only table counts its rows as upserted", async () => {
+  await db.source.exec(`insert into tenant_table values (1), (2);`);
+  await run("tenant_table", "true");
+
+  const result = await run("tenant_table", "true");
+
+  expect(result.tables[0]).toMatchObject({ table: "public.tenant_table", rowsUpserted: 2 });
 });
 
 test("a composite foreign key loads with its columns paired", async () => {
@@ -179,7 +189,7 @@ describe("custom types", () => {
 
     const result = await run("enum_table", "id = 1");
 
-    expect(result.schema.typesCreated).toEqual(["enum_status"]);
+    expect(result.schema.typesCreated).toEqual(["public.enum_status"]);
     expect(
       await db.target.query(
         "select unnest(enum_range(null::enum_status))::text as label",
@@ -187,11 +197,39 @@ describe("custom types", () => {
     ).toEqual([{ label: "active" }, { label: "inactive" }]);
   });
 
+  test("an array of a missing enum creates the enum", async () => {
+    await db.source.exec(`insert into enum_array_table values (1, '{happy,sad}');`);
+
+    const result = await run("enum_array_table", "id = 1");
+
+    expect(result.schema.typesCreated).toEqual(["public.mood"]);
+    expect(await db.target.query("select moods::text from enum_array_table")).toEqual([
+      { moods: "{happy,sad}" },
+    ]);
+  });
+
+  test("enums are created in their own schema, same-named ones kept apart", async () => {
+    await db.source.exec(
+      `insert into billing.invoice values (1, 'paid', 'closed', '{draft,paid}');`,
+    );
+
+    const result = await run("invoice", "id = 1", { schema: "billing" });
+
+    expect(result.schema.typesCreated.sort()).toEqual(["billing.invoice_status", "public.invoice_status"]);
+    const labels = (type: string) =>
+      db.target.query(`select unnest(enum_range(null::${type}))::text as label`);
+    expect(await labels("billing.invoice_status")).toEqual([{ label: "draft" }, { label: "paid" }]);
+    expect(await labels("public.invoice_status")).toEqual([{ label: "open" }, { label: "closed" }]);
+    expect(await db.target.query("select status::text, legacy::text, history::text from billing.invoice")).toEqual([
+      { status: "paid", legacy: "closed", history: "{draft,paid}" },
+    ]);
+  });
+
   test("a missing domain is a named error", async () => {
     await db.source.exec(`insert into domain_table values (1, 5);`);
 
     await expect(run("domain_table", "id = 1")).rejects.toThrow(
-      /public\.domain_table\.amount uses type "positive_int", which doesn't exist on the target and isn't an enum/,
+      /public\.domain_table\.amount uses type "public\.positive_int", which doesn't exist on the target and isn't an enum/,
     );
   });
 });

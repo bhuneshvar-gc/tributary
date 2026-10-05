@@ -4,6 +4,15 @@ import { useDatabases } from "./support/engine.js";
 
 const db = useDatabases();
 
+const int = (name: string) => ({
+  name,
+  type: "integer",
+  udtSchema: "pg_catalog",
+  udtName: "int4",
+  sqlType: "integer",
+  nullable: false,
+});
+
 test("inspect reports base tables with columns, keys and composite foreign keys", async () => {
   const schema = await inspect(db.source.url);
 
@@ -14,40 +23,10 @@ test("inspect reports base tables with columns, keys and composite foreign keys"
     name: "composite_child_table",
     primaryKey: ["id"],
     columns: [
-      {
-        name: "id",
-        type: "integer",
-        udtName: "int4",
-        nullable: false,
-        numericPrecision: 32,
-        numericScale: 0,
-        sqlType: "integer",
-      },
-      {
-        name: "parent_id",
-        type: "integer",
-        udtName: "int4",
-        nullable: false,
-        numericPrecision: 32,
-        numericScale: 0,
-        sqlType: "integer",
-      },
-      {
-        name: "tenant_id",
-        type: "integer",
-        udtName: "int4",
-        nullable: false,
-        numericPrecision: 32,
-        numericScale: 0,
-        sqlType: "integer",
-      },
-      {
-        name: "sku",
-        type: "text",
-        udtName: "text",
-        nullable: false,
-        sqlType: "text",
-      },
+      int("id"),
+      int("parent_id"),
+      int("tenant_id"),
+      { name: "sku", type: "text", udtSchema: "pg_catalog", udtName: "text", sqlType: "text", nullable: false },
     ],
     foreignKeys: [
       {
@@ -59,45 +38,47 @@ test("inspect reports base tables with columns, keys and composite foreign keys"
       },
     ],
   });
-  expect(
-    schema.tables.find((t) => t.name === "composite_parent_table")?.primaryKey,
-  ).toEqual(["tenant_id", "id"]);
+  expect(schema.tables.find((t) => t.name === "composite_parent_table")?.primaryKey).toEqual([
+    "tenant_id",
+    "id",
+  ]);
 });
 
-test("inspect reports enums, domains and sized types", async () => {
+test("inspect reports schema-qualified enums, domains and exact types", async () => {
   const schema = await inspect(db.source.url);
-  const columns = (table: string) =>
-    schema.tables.find((t) => t.name === table)!.columns;
+  const columns = (table: string) => schema.tables.find((t) => t.name === table)!.columns;
 
-  expect(schema.enums).toEqual({ enum_status: ["active", "inactive"] });
+  expect(schema.enums).toEqual({
+    "billing.invoice_status": ["draft", "paid"],
+    "public.enum_status": ["active", "inactive"],
+    "public.invoice_status": ["open", "closed"],
+    "public.mood": ["happy", "sad"],
+  });
   expect(columns("enum_table")[1]).toMatchObject({
     type: "USER-DEFINED",
+    udtSchema: "public",
     udtName: "enum_status",
     sqlType: "enum_status",
   });
+  expect(columns("invoice")).toMatchObject([
+    { name: "id" },
+    { name: "status", udtSchema: "billing", udtName: "invoice_status", sqlType: "billing.invoice_status" },
+    { name: "legacy", udtSchema: "public", udtName: "invoice_status", sqlType: "invoice_status" },
+    { name: "history", type: "ARRAY", udtSchema: "billing", udtName: "_invoice_status", sqlType: "billing.invoice_status[]" },
+  ]);
   expect(columns("domain_table")[1]).toMatchObject({
     type: "USER-DEFINED",
+    udtSchema: "public",
     udtName: "positive_int",
     sqlType: "positive_int",
   });
-  expect(columns("typed_table")).toMatchObject([
-    { name: "id", type: "bigint" },
-    { name: "at", type: "timestamp with time zone" },
-    {
-      name: "amount",
-      type: "numeric",
-      numericPrecision: 12,
-      numericScale: 4,
-      sqlType: "numeric(12,4)",
-    },
-    {
-      name: "code",
-      type: "character varying",
-      charMaxLength: 8,
-      sqlType: "character varying(8)",
-    },
-    { name: "payload", type: "jsonb" },
-    { name: "tags", type: "ARRAY", udtName: "_text", sqlType: "text[]" },
-    { name: "blob", type: "bytea" },
+  expect(columns("typed_table").map((c) => [c.name, c.sqlType])).toEqual([
+    ["id", "bigint"],
+    ["at", "timestamp with time zone"],
+    ["amount", "numeric(12,4)"],
+    ["code", "character varying(8)"],
+    ["payload", "jsonb"],
+    ["tags", "text[]"],
+    ["blob", "bytea"],
   ]);
 });

@@ -1,4 +1,4 @@
-import type { DependencyBreak, Seed, Traversal } from "./config.js";
+import type { DependencyBreak, Seed, TableColumn, Traversal } from "./config.js";
 import {
   ident,
   type Queryable,
@@ -30,9 +30,7 @@ export interface Closure {
  * dependency break (auto: false), or picked under best-effort cycle
  * handling (auto: true).
  */
-export interface AppliedBreak {
-  table: NodeId;
-  column: string;
+export interface AppliedBreak extends TableColumn {
   auto: boolean;
 }
 
@@ -56,9 +54,14 @@ interface Found {
   reach: Reach;
 }
 
+/** A row's values for `columns`, encoded for use as a map/set key. */
+export function valuesKey(columns: string[], row: Row): string {
+  return JSON.stringify(columns.map((c) => row[c] ?? null));
+}
+
 /** Canonical identity of a row: its primary key values, in key order. */
 export function rowKey(primaryKey: string[], row: Row): string {
-  return JSON.stringify(primaryKey.map((c) => row[c] ?? null));
+  return valuesKey(primaryKey, row);
 }
 
 /**
@@ -120,6 +123,7 @@ function requirePrimaryKey(graph: Graph, table: NodeId): string[] {
 class Walker {
   readonly closure: Closure = { rows: new Map(), breaks: [], warnings: [] };
   private readonly reach = new Map<string, Reach>();
+  /** Broken edges, by columnId of each of their from-columns. */
   private readonly broken = new Set<string>();
 
   constructor(
@@ -127,6 +131,14 @@ class Walker {
     private readonly graph: Graph,
     private readonly options: ClosureOptions,
   ) {}
+
+  /**
+   * How a row reached only as a required parent counts: under "full"
+   * traversal every row fans out, so parents are downstream too.
+   */
+  private get parentReach(): Reach {
+    return this.options.traversal === "full" ? "downstream" : "parent";
+  }
 
   /**
    * Records a found row; true if it should be (re)expanded: the first
@@ -155,8 +167,6 @@ class Walker {
 
   async expand({ table, row, reach }: Found): Promise<Found[]> {
     const next: Found[] = [];
-    const parentReach: Reach =
-      this.options.traversal === "full" ? "downstream" : "parent";
 
     for (const e of this.graph.outgoing(table)) {
       const values = valuesOf(row, e.fromColumns);
@@ -169,7 +179,7 @@ class Walker {
       if (this.graph.inCycle(e) && this.breakEdge(e)) continue;
       const rows = await this.select(e.to, e.toColumns, values);
       for (const r of rows)
-        next.push({ table: e.to, row: r, reach: parentReach });
+        next.push({ table: e.to, row: r, reach: this.parentReach });
     }
 
     if (this.options.traversal === "full" || reach === "downstream") {
@@ -204,9 +214,7 @@ class Walker {
       return [];
     }
     const rows = await this.select(target.to, target.toColumns, values);
-    const reach: Reach =
-      this.options.traversal === "full" ? "downstream" : "parent";
-    return rows.map((r): Found => ({ table: target.to, row: r, reach }));
+    return rows.map((r): Found => ({ table: target.to, row: r, reach: this.parentReach }));
   }
 
   private async followPolymorphicReverse(
@@ -230,7 +238,7 @@ class Walker {
    * hop per row.
    */
   private breakEdge(e: FixedEdge): boolean {
-    if (e.fromColumns.some((c) => this.broken.has(`${e.from}.${c}`)))
+    if (e.fromColumns.some((c) => this.broken.has(columnId(e.from, c))))
       return true;
 
     const breaks = this.options.dependencyBreaks ?? [];
@@ -251,7 +259,7 @@ class Walker {
         `unresolved cycle: ${e.from}.${e.fromColumns.join(",")} is part of a foreign key cycle with no dependency break (add one, or turn off strictCycles for best-effort)`,
       );
     }
-    for (const c of e.fromColumns) this.broken.add(`${e.from}.${c}`);
+    for (const c of e.fromColumns) this.broken.add(columnId(e.from, c));
     this.closure.breaks.push({
       table: e.from,
       column: configured ?? e.fromColumns[0]!,
@@ -274,6 +282,10 @@ class Walker {
     );
     return result.rows;
   }
+}
+
+function columnId(table: NodeId, column: string): string {
+  return `${table}.${column}`;
 }
 
 /** The row's values for `columns`, or undefined if any is NULL. */
