@@ -20,6 +20,8 @@ export interface UserConfig {
     apiKey?: string;
     baseUrl?: string;
   };
+  /** Update notices; on unless `check` is false. */
+  updates?: { check?: boolean };
 }
 
 /** A settable key, its description, and how its CLI string is parsed. */
@@ -58,6 +60,14 @@ const KEYS: KeySpec[] = [
     pattern: /^ai\.(model|apiKey|baseUrl)$/,
     example: "ai.model | ai.apiKey | ai.baseUrl",
     parse: (s) => s,
+  },
+  {
+    pattern: /^updates\.check$/,
+    example: "updates.check",
+    parse: (s) => {
+      if (s !== "true" && s !== "false") throw new Error("updates.check must be true or false");
+      return s === "true";
+    },
   },
 ];
 

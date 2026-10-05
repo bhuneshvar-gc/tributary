@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   checkSchemaFile,
   inspect,
@@ -21,12 +21,23 @@ import * as p from "@clack/prompts";
 import Table from "cli-table3";
 import { Command, Option } from "commander";
 import pc from "picocolors";
+import semver from "semver";
 import { createModel, generateCommand, toCliArgs } from "./ai.js";
 import { findSchemaFile, loadRunSchema, relabel } from "./schema-file.js";
+import {
+  type AvailableUpdate,
+  CHECK_INTERVAL_MS,
+  checkForUpdate,
+  npmUpdateSource,
+  type UpdateSource,
+} from "./update-check.js";
 import { openUserConfig, type UserConfigStore } from "./user-config.js";
 
 // Both src/ and dist/ sit one level below the package root.
-const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
+const { name: packageName, version } = createRequire(import.meta.url)("../package.json") as {
+  name: string;
+  version: string;
+};
 
 export interface ProgramContext {
   cwd: string;
@@ -38,6 +49,8 @@ export interface ProgramContext {
    * (not a terminal: CI, pipes), so commands fail with a hint instead.
    */
   confirm?: (message: string) => Promise<boolean>;
+  /** Where new versions are looked up and installed from. */
+  updates: UpdateSource;
 }
 
 /** A y/N prompt on the terminal, or undefined when stdin/stderr aren't one. */
@@ -207,6 +220,25 @@ export function createProgram(ctx: ProgramContext): Command {
   addSchemaCommands(ctx, program);
   addConfigCommands(ctx, program);
   addAiCommand(ctx, program);
+
+  program
+    .command("update")
+    .description("install the latest version of tributary from npm, if there's a newer one")
+    .action(async () => {
+      const latest = await ctx.updates.fetchLatest();
+      if (latest === undefined)
+        throw new Error(
+          "couldn't get the latest version from the npm registry (offline, or not published yet?)",
+        );
+      if (!semver.valid(latest) || !semver.gt(latest, version)) {
+        ctx.stdout(`${packageName} ${version} is the latest version\n`);
+        return;
+      }
+      const spec = `${packageName}@${latest}`;
+      ctx.stderr(`${pc.dim(`running npm install -g ${spec}`)}\n`);
+      await ctx.updates.install(spec);
+      ctx.stdout(`updated ${packageName} ${version} → ${latest}\n`);
+    });
   return program;
 }
 
@@ -440,17 +472,42 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
     userConfig: openUserConfig(),
     stdout: (s) => process.stdout.write(s),
     stderr: (s) => process.stderr.write(s),
+    updates: npmUpdateSource(packageName),
     ...(confirm && { confirm }),
     ...ctx,
   };
+  // Runs alongside the command, so it only adds time when the command finishes first.
+  const update = argv[0] === "update" ? undefined : startUpdateCheck(context);
+  let code: number;
   try {
     await createProgram(context).parseAsync(argv, { from: "user" });
-    return 0;
+    code = 0;
   } catch (e) {
     const err = e as { code?: string; exitCode?: number };
     // Commander has already printed its own usage errors.
-    if (err.code?.startsWith("commander.")) return err.exitCode ?? 1;
-    context.stderr(`${pc.red("error:")} ${e instanceof Error ? e.message : String(e)}\n`);
-    return 1;
+    if (err.code?.startsWith("commander.")) code = err.exitCode ?? 1;
+    else {
+      context.stderr(`${pc.red("error:")} ${e instanceof Error ? e.message : String(e)}\n`);
+      code = 1;
+    }
   }
+  const available = await update;
+  if (available) {
+    context.stderr(
+      `\n${pc.yellow(`Update available: ${available.current} → ${available.latest}. Run: tributary update`)}\n`,
+    );
+  }
+  return code;
+}
+
+/** Starts the update check unless turned off (updates.check false, or TRIBUTARY_NO_UPDATE_CHECK). */
+function startUpdateCheck(ctx: ProgramContext): Promise<AvailableUpdate | undefined> | undefined {
+  if (process.env.TRIBUTARY_NO_UPDATE_CHECK) return undefined;
+  if (ctx.userConfig.all().updates?.check === false) return undefined;
+  return checkForUpdate({
+    current: version,
+    cachePath: join(dirname(ctx.userConfig.path), "update-check.json"),
+    intervalMs: CHECK_INTERVAL_MS,
+    fetchLatest: () => ctx.updates.fetchLatest(),
+  });
 }

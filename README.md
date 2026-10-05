@@ -80,6 +80,19 @@ tables:
 AI providers: `anthropic` (default), `openai`, `google`, `openrouter` (set `ai.model`)
 and `opencode` (an OpenAI-compatible endpoint; set `ai.baseUrl` and `ai.model`).
 
+## Updates
+
+Every run checks npm for a newer version, alongside the command and with a short
+timeout, and prints a notice on stderr when one exists:
+
+```
+Update available: 0.1.0 → 0.2.0. Run: tributary update
+```
+
+`tributary update` installs it (`npm install -g @bhuneshvar-k/tributary@<latest>`).
+Nothing installs unless you run it. Turn the check off with
+`tributary config set updates.check false` or `TRIBUTARY_NO_UPDATE_CHECK=1`.
+
 ## How it behaves
 
 - **Traversal.** A seed's children are followed, and so are the parents every row

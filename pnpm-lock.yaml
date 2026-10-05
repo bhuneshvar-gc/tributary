@@ -59,6 +59,9 @@ importers:
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
+      semver:
+        specifier: ^7.8.5
+        version: 7.8.5
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -69,6 +72,9 @@ importers:
       '@electric-sql/pglite-socket':
         specifier: ^0.2.11
         version: 0.2.11(@electric-sql/pglite-age@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_hashids@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_ivm@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_textsearch@0.0.10(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pg_uuidv7@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgtap@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite-pgvector@0.0.9(@electric-sql/pglite@0.5.8))(@electric-sql/pglite@0.5.8)
+      '@types/semver':
+        specifier: ^7.8.0
+        version: 7.8.0
       yaml:
         specifier: ^2.9.1
         version: 2.9.1
@@ -408,6 +414,9 @@ packages:
 
   '@types/pg@8.23.1':
     resolution: {integrity: sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -1119,6 +1128,8 @@ snapshots:
       '@types/node': 26.6.4
       pg-protocol: 1.16.1
       pg-types: 2.2.0
+
+  '@types/semver@7.8.0': {}
 
   '@vercel/oidc@3.2.0': {}
 

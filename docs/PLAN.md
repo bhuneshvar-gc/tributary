@@ -218,8 +218,13 @@ Decisions made while building, superseding the tables above where they differ:
   `--no-create-schema`, `ai --dry-run`, and `ai.baseUrl`. The five AI
   providers match the Go version; `opencode` requires an explicit
   `ai.baseUrl` rather than defaulting to a guessed local port.
-- **Version handling** is the CLI's `--version` from package.json; update
-  checks are left to npm, since binaries and the self-updater were cut.
+- **Version handling:** `--version` comes from package.json. Each run checks
+  the npm registry's `latest` tag alongside the command (1.5s timeout,
+  silent on failure) and prints an update notice on stderr;
+  `tributary update` runs `npm install -g <package>@<latest>`. The answer
+  is cached in `update-check.json` next to the user config, and
+  `CHECK_INTERVAL_MS` (0 = every run for now) switches it to e.g. daily.
+  Off with `updates.check false` or `TRIBUTARY_NO_UPDATE_CHECK=1`.
 - **Not handled yet:** generated columns and identity `ALWAYS` columns on
   a pre-provisioned target; closure fetches are one query per row and
   edge (batching is a phase 5 item).

@@ -35,11 +35,13 @@
     "commander": "^15.0.0",
     "conf": "^15.1.0",
     "picocolors": "^1.1.1",
+    "semver": "^7.8.5",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@electric-sql/pglite-socket": "^0.2.11",
+    "@types/semver": "^7.8.0",
     "yaml": "^2.9.1"
   }
 }
