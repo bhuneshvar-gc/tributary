@@ -23,14 +23,24 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
+      - name: Check the tag matches both package versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for pkg in core cli; do
+            version=$(node -p "require('./packages/$pkg/package.json').version")
+            if [ "$version" != "$tag" ]; then
+              echo "::error::tag $GITHUB_REF_NAME but packages/$pkg/package.json is $version; bump both versions, then tag"
+              exit 1
+            fi
+          done
       - run: pnpm typecheck && pnpm test && pnpm build
       # pnpm pack rewrites workspace:* dependencies to real versions;
       # npm publish then authenticates with the workflow's OIDC token.
+      # Core goes first: the CLI depends on it. Tarball paths start with
+      # ./ so npm reads them as files, not GitHub "owner/repo" shorthands.
       - name: Publish
         run: |
           for pkg in core cli; do
-            (cd packages/$pkg && pnpm pack --pack-destination ../../dist-pack)
-          done
-          for tarball in dist-pack/*.tgz; do
-            npm publish "$tarball" --provenance --access public
+            tarball=$(cd packages/$pkg && pnpm pack --pack-destination ../../dist-pack | tail -1)
+            npm publish "./dist-pack/$(basename "$tarball")" --provenance --access public
           done
