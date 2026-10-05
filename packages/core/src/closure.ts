@@ -1,6 +1,6 @@
-import type { DependencyBreak, Seed, TableColumn, Traversal } from "./config.js";
 import { ident, type Queryable, qualified, querySingleStatement, type Row } from "./db.js";
 import type { Edge, FixedEdge, Graph, NodeId, PolymorphicReverse } from "./graph.js";
+import type { CycleBreak, Seed, TableColumn, Traversal } from "./model.js";
 
 /**
  * The subset: every row, grouped by table and keyed by primary key, that
@@ -25,7 +25,7 @@ export interface AppliedBreak extends TableColumn {
 export interface ClosureOptions {
   traversal?: Traversal;
   strictCycles?: boolean;
-  dependencyBreaks?: DependencyBreak[];
+  cycleBreaks?: CycleBreak[];
 }
 
 /**
@@ -212,7 +212,7 @@ class Walker {
   private breakEdge(e: FixedEdge): boolean {
     if (e.fromColumns.some((c) => this.broken.has(columnId(e.from, c)))) return true;
 
-    const breaks = this.options.dependencyBreaks ?? [];
+    const breaks = this.options.cycleBreaks ?? [];
     const configured = e.fromColumns.find((c) =>
       breaks.some((b) => b.table === e.from && b.column === c),
     );

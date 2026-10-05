@@ -31,7 +31,7 @@ export interface TableColumn {
   column: string;
 }
 
-export type DependencyBreak = TableColumn & { at?: string };
+export type CycleBreak = TableColumn & { at?: string };
 
 /** Where a subset starts: the rows of `table` matching `where`, a raw SQL WHERE fragment. */
 export interface Seed {
@@ -48,7 +48,7 @@ export const TRAVERSALS = ["downstream", "full"] as const;
 export type Traversal = (typeof TRAVERSALS)[number];
 
 /** Every problem found in a schema file, reported together. */
-export class ConfigError extends Error {
+export class SchemaFileError extends Error {
   constructor(
     readonly issues: string[],
     readonly file?: string,
@@ -56,7 +56,12 @@ export class ConfigError extends Error {
     super(
       `${file ? `${file}: ` : ""}invalid schema file:\n${issues.map((i) => `  - ${i}`).join("\n")}`,
     );
-    this.name = "ConfigError";
+    this.name = "SchemaFileError";
+  }
+
+  /** The same problems, labelled with the file they came from (as the user knows it). */
+  inFile(file: string): SchemaFileError {
+    return new SchemaFileError(this.issues, file);
   }
 }
 
@@ -71,7 +76,23 @@ export function formatRef(r: ColumnRef): string {
     : `${tableKey(r)}.[${r.columns.join(",")}]`;
 }
 
-/** Qualifies a bare table name with the "public" schema. */
-export function qualifyTable(table: string): string {
-  return table.includes(".") ? table : `public.${table}`;
+/**
+ * Splits "table" or "schema.table" into its parts, a bare name going in
+ * `defaultSchema`; undefined if it's neither.
+ */
+export function parseTableName(
+  name: string,
+  defaultSchema = "public",
+): { schema: string; table: string } | undefined {
+  const parts = name.split(".");
+  if (parts.some((p) => !p) || parts.length > 2) return undefined;
+  return parts.length === 1
+    ? { schema: defaultSchema, table: parts[0]! }
+    : { schema: parts[0]!, table: parts[1]! };
+}
+
+/** Qualifies a table name ("orders" -> "public.orders"), keeping one already qualified. */
+export function qualifyTable(table: string, defaultSchema = "public"): string {
+  const parsed = parseTableName(table, defaultSchema);
+  return parsed ? tableKey(parsed) : table;
 }

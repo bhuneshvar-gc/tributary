@@ -65,12 +65,15 @@ tables:
   `./schema.yml` or `./schema.json` is used, the first that exists, and the run prints
   which. With no schema file, only database foreign keys are followed.
 - **Start one:** `tributary schema init --source prod` writes `./schema.yaml`. It lists
-  every table, with real foreign keys as comments and commented guesses for `*_id`
-  columns that have none; uncomment the right guesses. It won't overwrite an existing
-  file without `--force`. `-o <path>` writes elsewhere, and `--format json` writes JSON,
-  which has no room for the guesses.
+  every table by its schema-qualified name (`public.orders`, public included), its real
+  foreign keys as comments, and each `*_id` column without one as a bare `# order_id:`
+  line. Uncomment the ones that are references and add their target; nothing is guessed.
+  It won't overwrite an existing file without `--force`. `-o <path>` writes elsewhere,
+  and `--format json` writes JSON, which lists only the tables since JSON has no
+  comments.
 - **Check one:** `tributary schema validate [--schema <file>] [--source prod]` checks the
-  format, and with `--source`, that every table and column exists. It exits non-zero on
+  format, and with `--source`, that every table it names (even with nothing declared
+  under it) and every column exists. It exits non-zero on
   any problem, so it fits CI.
 
 AI providers: `anthropic` (default), `openai`, `google`, `openrouter` (set `ai.model`)

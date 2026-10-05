@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadSchemaFile, type SchemaFile } from "@bhuneshvar-k/tributary-core";
+import { loadSchemaFile, type SchemaFile, SchemaFileError } from "@bhuneshvar-k/tributary-core";
 
 /** Checked in this order when --schema isn't given; the first that exists wins. */
 export const SCHEMA_FILE_NAMES = ["schema.yaml", "schema.yml", "schema.json"] as const;
@@ -41,6 +41,7 @@ export async function loadRunSchema(
 
 /** Errors name the file as the user knows it (./schema.yaml), not its absolute path. */
 export function relabel(e: unknown, file: { path: string; shown: string }): unknown {
+  if (e instanceof SchemaFileError) return e.inFile(file.shown);
   if (e instanceof Error) e.message = e.message.replaceAll(file.path, file.shown);
   return e;
 }

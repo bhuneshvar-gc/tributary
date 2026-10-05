@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { ConfigError, loadSchemaFile, parseSchemaFile } from "../src/index.js";
+import { loadSchemaFile, parseSchemaFile, SchemaFileError } from "../src/index.js";
 
 const ref = (schema: string, table: string, ...columns: string[]) => ({ schema, table, columns });
 
@@ -10,10 +10,10 @@ function issues(input: unknown): string[] {
   try {
     parseSchemaFile(input);
   } catch (e) {
-    if (e instanceof ConfigError) return e.issues;
+    if (e instanceof SchemaFileError) return e.issues;
     throw e;
   }
-  throw new Error("expected a ConfigError");
+  throw new Error("expected a SchemaFileError");
 }
 
 describe("parseSchemaFile", () => {
@@ -106,15 +106,37 @@ describe("parseSchemaFile", () => {
     expect(schema.relations).toMatchObject([
       { kind: "ignore", column: ref("public", "audit_logs", "actor_id") },
     ]);
-    expect(schema.dependencyBreaks).toMatchObject([
-      { table: "hr.employees", column: "manager_id" },
-    ]);
+    expect(schema.cycleBreaks).toMatchObject([{ table: "hr.employees", column: "manager_id" }]);
   });
 
   test("tables and sections left empty (only comments in YAML) are fine", () => {
     expect(
       parseSchemaFile({ version: 1, tables: { containers: null, orders: { references: null } } }),
-    ).toEqual({ relations: [], dependencyBreaks: [] });
+    ).toMatchObject({ relations: [], cycleBreaks: [] });
+  });
+
+  test("records the default schema and every declared table, even empty ones", () => {
+    expect(
+      parseSchemaFile({
+        version: 1,
+        defaultSchema: "app",
+        tables: { containers: null, "crm.leads": {} },
+      }),
+    ).toMatchObject({
+      defaultSchema: "app",
+      tables: [
+        { table: "app.containers", at: "tables.containers" },
+        { table: "crm.leads", at: 'tables."crm.leads"' },
+      ],
+    });
+  });
+
+  test("accepts YAML or JSON text as well as a parsed object", () => {
+    const yaml = "version: 1\ntables:\n  a:\n    references:\n      b_id: b.id\n";
+    expect(parseSchemaFile(yaml).relations).toHaveLength(1);
+    expect(
+      parseSchemaFile('{"version": 1, "tables": {"a": {"ignore": ["x"]}}}').relations,
+    ).toHaveLength(1);
   });
 
   describe("identification", () => {
@@ -185,6 +207,33 @@ describe("parseSchemaFile", () => {
           },
         }),
       ).toHaveLength(3);
+    });
+
+    test("a structural problem doesn't hide problems in other sections or tables", () => {
+      expect(
+        issues({
+          version: 1,
+          tables: {
+            a: { references: { x: "bad" }, ignore: "not-a-list" },
+            b: { refs: {} },
+            c: { references: { y: "also_bad" } },
+          },
+        }),
+      ).toEqual([
+        "tables.a.ignore: Invalid input: expected array, received string",
+        'tables.a.references.x: invalid target "bad": expected "table.column" or "schema.table.column"',
+        'tables.b: Unrecognized key: "refs"',
+        'tables.c.references.y: invalid target "also_bad": expected "table.column" or "schema.table.column"',
+      ]);
+    });
+
+    test("a polymorphic entry is a single column, not a comma list", () => {
+      expect(
+        issues({
+          version: 1,
+          tables: { c: { polymorphic: { "a, b": { typeColumn: "t", targets: { X: "x.id" } } } } },
+        }),
+      ).toEqual(['tables.c.polymorphic."a, b": a polymorphic reference is one column, not a list']);
     });
   });
 });

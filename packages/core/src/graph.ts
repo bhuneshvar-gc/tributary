@@ -1,5 +1,5 @@
 import { findColumn, type Schema, type Table, tableId } from "./catalog.js";
-import { type ColumnRef, ConfigError, formatRef, type Relation, tableKey } from "./config.js";
+import { type ColumnRef, formatRef, type Relation, SchemaFileError, tableKey } from "./model.js";
 import type { SchemaFile } from "./schema-file.js";
 
 /** A schema-qualified table identifier: "schema.table". */
@@ -170,10 +170,37 @@ function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
 /**
  * Merges a catalog schema with a schema file's relations into a Graph.
  * Every relation is checked against the catalog; all unknown table/column
- * references are reported together in one ConfigError, each named by where
+ * references are reported together in one SchemaFileError, each named by where
  * the schema file declared it.
  */
-export function buildGraph(schema: Schema, file?: Partial<SchemaFile>): Graph {
+export function buildGraph(
+  schema: Schema,
+  file?: Pick<SchemaFile, "relations" | "cycleBreaks">,
+): Graph {
+  const { graph, issues } = mergeSchemaFile(schema, file);
+  if (issues.length) throw new SchemaFileError(issues);
+  return graph;
+}
+
+/**
+ * Every way `file` doesn't fit the database `schema`: relations naming
+ * missing tables or columns, cycle breaks that don't break a cycle, and
+ * tables the file lists (even with nothing declared) that don't exist.
+ * Empty when the file fits. buildGraph tolerates the last kind, so a
+ * table dropped from the database doesn't block syncs.
+ */
+export function checkSchemaFile(schema: Schema, file: SchemaFile): string[] {
+  const known = new Set(schema.tables.map(tableId));
+  const missing = file.tables
+    .filter((t) => !known.has(t.table))
+    .map((t) => `${t.at}: no such table "${t.table}" in the database`);
+  return [...missing, ...mergeSchemaFile(schema, file).issues];
+}
+
+function mergeSchemaFile(
+  schema: Schema,
+  file: Pick<SchemaFile, "relations" | "cycleBreaks"> | undefined,
+): { graph: Graph; issues: string[] } {
   const g = new Graph();
   for (const t of schema.tables) g.tables.set(tableId(t), t);
   for (const t of schema.tables) {
@@ -190,26 +217,28 @@ export function buildGraph(schema: Schema, file?: Partial<SchemaFile>): Graph {
     }
   }
 
+  // `at` is set by parseSchemaFile; relations built in code fall back to their index.
   const issues: string[] = [];
-  file?.relations?.forEach((r, i) => {
+  file?.relations.forEach((r, i) => {
     const problem = mergeRelation(g, r);
     if (problem) issues.push(`${r.at ?? `relations.${i}`}: ${problem}`);
   });
-  if (issues.length) throw new ConfigError(issues);
+  if (issues.length) return { graph: g, issues };
 
   g.indexCycles();
-  file?.dependencyBreaks?.forEach((b, i) => {
-    const breaksACycle = g
-      .outgoing(b.table)
-      .some((e) => e.fromColumns.includes(b.column) && g.inCycle(e));
-    if (!breaksACycle) {
+  file?.cycleBreaks.forEach((b, i) => {
+    const at = b.at ?? `cycleBreaks.${i}`;
+    const table = g.table(b.table);
+    if (!table) issues.push(`${at}: no such table "${b.table}" in source schema`);
+    else if (!findColumn(table, b.column))
+      issues.push(`${at}: no such column "${b.column}" on "${b.table}"`);
+    else if (!g.outgoing(b.table).some((e) => e.fromColumns.includes(b.column) && g.inCycle(e))) {
       issues.push(
-        `${b.at ?? `dependencyBreaks.${i}`}: ${b.table}.${b.column} is not part of any foreign key cycle; remove it or fix the table/column`,
+        `${at}: ${b.table}.${b.column} is not part of any foreign key cycle; remove it or fix the table/column`,
       );
     }
   });
-  if (issues.length) throw new ConfigError(issues);
-  return g;
+  return { graph: g, issues };
 }
 
 /** Returns a description of what's wrong, or undefined once merged. */

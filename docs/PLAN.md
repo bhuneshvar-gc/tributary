@@ -39,7 +39,7 @@ users, so there is no compatibility contract.
 | Lint / format         | Biome                                                                      |
 | CLI framework         | commander                                                                  |
 | Config parsing        | zod                                                                        |
-| Project config loader | c12 (uses jiti; also loads .json/.yaml)                                    |
+| Schema file parsing   | `yaml` + zod                                                               |
 | Postgres              | `pg` + `pg-format` (`pg-logical-replication` reserved for phase 4)         |
 | AI                    | Vercel AI SDK v7 structured output (`generateText` + `Output.object`)      |
 | CLI UX                | `@clack/prompts`, `cli-table3`, `picocolors`                               |
@@ -78,10 +78,13 @@ users, so there is no compatibility contract.
    `--schema <file>` picks it; otherwise the first of `./schema.yaml`,
    `./schema.yml`, `./schema.json` is used (and named on stderr); with
    none, only database foreign keys are followed, with a note.
-   `tributary schema init --source <name>` writes a template (real FKs as
-   comments, commented guesses for `*_id` columns, no overwrite without
-   `--force`); `tributary schema validate` checks format and, with
-   `--source`, existence of every table and column.
+   `tributary schema init --source <name>` writes a template: every table
+   schema-qualified (public included), real FKs as comments, each `*_id`
+   column without one as a bare `# column:` line to fill in, nothing
+   guessed, no overwrite without `--force`. `tributary schema validate`
+   checks format and, with `--source`, that every named table (even an
+   empty entry) and column exists. A bare seed table (`-t orders`)
+   resolves in the schema file's `defaultSchema`.
 
 3. **Run options are CLI flags**: `--source`/`--target` (required),
    repeatable `-t/--seed-table` + `-w/--where` pairs, `--traversal`,

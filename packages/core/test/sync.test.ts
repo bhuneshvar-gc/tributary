@@ -249,6 +249,40 @@ describe("resume", () => {
     expect(await db.target.query("select count(*)::int as n from child_table")).toEqual([{ n: 1 }]);
   });
 
+  test("reordering the schema file without changing its meaning doesn't break a resume", async () => {
+    await db.source.exec(`
+      insert into parent_table values (1, 'p1');
+      insert into child_table values (10, 1, 'bad');`);
+    await db.target.exec(`
+      create table parent_table (id int primary key, name text not null);
+      create table child_table (id int primary key, parent_id int not null references parent_table, name text not null check (name <> 'bad'));`);
+    const poly = {
+      polymorphic: { target_id: { typeColumn: "target_type", targets: { A: "poly_target_a.id" } } },
+    };
+    const composite = { references: { tenant_id: "tenant_table.id" } };
+
+    await expect(
+      run("parent_table", "id = 1", {
+        schemaFile: {
+          version: 1,
+          tables: { poly_source_table: poly, composite_child_table: composite },
+        },
+      }),
+    ).rejects.toThrow(/child_table/);
+    await db.target.exec(`alter table child_table drop constraint child_table_name_check;`);
+    const result = await run("parent_table", "id = 1", {
+      schemaFile: {
+        version: 1,
+        tables: { "public.composite_child_table": composite, "public.poly_source_table": poly },
+      },
+    });
+
+    expect(result.tables.map((t) => [t.table, t.resumed])).toEqual([
+      ["public.parent_table", true],
+      ["public.child_table", false],
+    ]);
+  });
+
   test("a resume reloads an already-loaded table whose source rows changed since", async () => {
     await db.source.exec(`
       insert into parent_table values (1, 'p1');

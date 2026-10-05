@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { parse } from "pg-connection-string";
-import type { Seed, Traversal } from "./config.js";
 import type { Queryable, Row } from "./db.js";
-import type { SchemaFile } from "./schema-file.js";
+import type { Seed } from "./model.js";
+import type { SubsetOptions } from "./plan.js";
 
 /**
  * Sync checkpoints, kept in the target database's `_tributary` schema so
@@ -23,11 +23,7 @@ function sha256(...parts: string[]): string {
  * What identifies "the same sync" across invocations: where from, which
  * seeds, which schema file contents, which traversal options.
  */
-export function runId(
-  sourceUrl: string,
-  seeds: Seed[],
-  options: { schema: SchemaFile; traversal: Traversal; strictCycles: boolean },
-): string {
+export function runId(sourceUrl: string, seeds: Seed[], options: Required<SubsetOptions>): string {
   const c = parse(sourceUrl);
   const source = `${c.host ?? "localhost"}:${c.port ?? 5432}/${c.database ?? ""}`;
   const { schema, traversal, strictCycles } = options;
@@ -35,12 +31,21 @@ export function runId(
     source,
     JSON.stringify(seeds),
     JSON.stringify({
-      relations: schema.relations,
-      breaks: schema.dependencyBreaks,
+      relations: canonical(schema.relations),
+      breaks: canonical(schema.cycleBreaks),
       traversal,
       strictCycles,
     }),
   ).slice(0, 16);
+}
+
+/**
+ * What a list of relations or breaks means, independent of how the file
+ * spelled it: no declaration locations, in a fixed order. Reordering keys
+ * or qualifying names in the schema file keeps the same run id.
+ */
+function canonical(items: { at?: string }[]): string[] {
+  return items.map(({ at: _, ...meaning }) => JSON.stringify(meaning)).sort();
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildGraph, ConfigError, parseSchemaFile } from "../src/index.js";
+import { buildGraph, checkSchemaFile, parseSchemaFile, SchemaFileError } from "../src/index.js";
 import { fk, schema, table } from "./support/schema.js";
 
 const users = table("public.users", ["id", "company_id"], {
@@ -119,8 +119,8 @@ describe("buildGraph", () => {
     } catch (e) {
       error = e;
     }
-    expect(error).toBeInstanceOf(ConfigError);
-    expect((error as ConfigError).issues).toEqual([
+    expect(error).toBeInstanceOf(SchemaFileError);
+    expect((error as SchemaFileError).issues).toEqual([
       'tables.orders.references.user_ref: from=public.orders.user_ref: no such table "public.orders" in source schema',
       'tables.users.references.nope: from=public.users.nope: no such column "nope" on "public.users"',
       'tables.users.polymorphic.company_id: polymorphicType=public.users.kind: no such column "kind" on "public.users"',
@@ -165,5 +165,40 @@ describe("buildGraph", () => {
         /tables\.users\.breakCycle\.0: public\.users\.company_id is not part of any foreign key cycle/,
       );
     });
+  });
+
+  test("a breakCycle column that doesn't exist says so", () => {
+    expect(() =>
+      buildGraph(
+        schema(users, companies),
+        parseSchemaFile({ version: 1, tables: { users: { breakCycle: ["boss_id"] } } }),
+      ),
+    ).toThrow(/tables\.users\.breakCycle\.0: no such column "boss_id" on "public\.users"/);
+  });
+});
+
+describe("checkSchemaFile", () => {
+  const db = schema(users, companies);
+
+  test("passes a file whose tables and columns all exist", () => {
+    expect(
+      checkSchemaFile(db, parseSchemaFile({ version: 1, tables: { users: null, companies: {} } })),
+    ).toEqual([]);
+  });
+
+  test("names every table that doesn't exist, empty entries included, and relation problems", () => {
+    expect(
+      checkSchemaFile(
+        db,
+        parseSchemaFile({
+          version: 1,
+          tables: { usres: null, "crm.leads": {}, users: { references: { nope: "companies.id" } } },
+        }),
+      ),
+    ).toEqual([
+      'tables.usres: no such table "public.usres" in the database',
+      'tables."crm.leads": no such table "crm.leads" in the database',
+      'tables.users.references.nope: from=public.users.nope: no such column "nope" on "public.users"',
+    ]);
   });
 });

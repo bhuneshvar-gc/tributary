@@ -42,17 +42,29 @@ export function parseAiCommand(input: unknown): AiCommand {
   return result.data;
 }
 
+/** Where a generated command runs: the user's own --source/--target/--schema. */
+export interface CommandContext {
+  source: string;
+  target?: string;
+  schema?: string;
+}
+
 /** The equivalent `tributary ...` arguments, leaving defaults off. */
-export function toCliArgs(c: AiCommand): string[] {
-  const args: string[] = [c.command];
-  if (c.command === "inspect") return args;
-  args.push("--seed-table", c.seedTable!, "--where", c.where!);
+export function toCliArgs(c: AiCommand, ctx: CommandContext): string[] {
+  if (c.command === "inspect") return ["inspect", "--source", ctx.source];
+  const args = [c.command, "--seed-table", c.seedTable!, "--where", c.where!];
   if (c.traversal === "full") args.push("--traversal", "full");
   if (c.command === "sync" && c.fresh) args.push("--fresh");
+  if (ctx.schema) args.push("--schema", ctx.schema);
+  args.push("--source", ctx.source);
+  if (c.command === "sync") {
+    if (!ctx.target) throw new Error("the model asked for a sync, but no --target was given");
+    args.push("--target", ctx.target);
+  }
   return args;
 }
 
-export function buildSystemPrompt(schema?: Schema): string {
+export function buildSystemPrompt(schema?: Schema, options: { canSync?: boolean } = {}): string {
   const lines = [
     "You are Tributary AI. Tributary copies referentially-consistent subsets of a Postgres",
     "database: starting from seed rows, it follows foreign keys to every row that must travel",
@@ -74,6 +86,12 @@ export function buildSystemPrompt(schema?: Schema): string {
     "  exist, pick the closest match and say so in warnings.",
     "- If the request is ambiguous, pick the most likely intent and state the assumption in warnings.",
   ];
+
+  if (options.canSync === false) {
+    lines.push(
+      '- "sync" is not available: no --target was given. Use "plan" instead, and say so in warnings.',
+    );
+  }
 
   if (schema?.tables.length) {
     lines.push("", "Database schema:");
@@ -120,10 +138,11 @@ export async function generateCommand(
   model: LanguageModel,
   request: string,
   schema?: Schema,
+  options: { canSync?: boolean } = {},
 ): Promise<AiCommand> {
   const { output } = await generateText({
     model,
-    system: buildSystemPrompt(schema),
+    system: buildSystemPrompt(schema, options),
     prompt: request,
     output: Output.object({ schema: aiCommandSchema }),
     maxRetries: 3,

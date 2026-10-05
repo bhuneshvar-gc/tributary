@@ -1,14 +1,15 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import {
-  buildGraph,
+  checkSchemaFile,
   inspect,
   loadSchemaFile,
   type PlanResult,
   plan,
   qualifyTable,
   type SchemaFile,
+  SchemaFileError,
   type Seed,
   type SyncResult,
   schemaTemplate,
@@ -52,16 +53,31 @@ interface SyncCommandOptions extends SubsetCommandOptions {
 
 const collect = (value: string, previous: string[]) => [...previous, value];
 
-const SOURCE_FLAG = "-s, --source <name>";
-const SOURCE_HELP = "source connection name (see tributary config set connections.<name>.url)";
-const SCHEMA_FLAG = "--schema <file>";
-const SCHEMA_HELP =
-  "schema file with app-level relations (default: ./schema.yaml, ./schema.yml or ./schema.json)";
+/** --source; required unless `optional` describes what it's for. */
+function sourceOption(optional?: string): Option {
+  const option = new Option(
+    "-s, --source <name>",
+    optional ?? "source connection name (see tributary config set connections.<name>.url)",
+  );
+  return optional ? option : option.makeOptionMandatory();
+}
+
+function schemaOption(): Option {
+  return new Option(
+    "--schema <file>",
+    "schema file with app-level relations (default: ./schema.yaml, ./schema.yml or ./schema.json)",
+  );
+}
+
+/** The source database's catalog, by connection name. */
+function inspectSource(ctx: ProgramContext, name: string) {
+  return inspect(ctx.userConfig.connectionUrl(name));
+}
 
 function subsetOptions(cmd: Command): Command {
   return cmd
-    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
-    .option(SCHEMA_FLAG, SCHEMA_HELP)
+    .addOption(sourceOption())
+    .addOption(schemaOption())
     .option(
       "-t, --seed-table <table>",
       'seed table, e.g. "users" or "billing.invoices" (repeatable)',
@@ -84,27 +100,36 @@ function subsetOptions(cmd: Command): Command {
     .option("--json", "print JSON");
 }
 
-/** Pairs each --seed-table with the --where in the same position. */
-function seeds(opts: Pick<SubsetCommandOptions, "seedTable" | "where">): Seed[] {
+/**
+ * Pairs each --seed-table with the --where in the same position. Bare
+ * table names resolve in the schema file's defaultSchema, as in the file.
+ */
+function seeds(
+  opts: Pick<SubsetCommandOptions, "seedTable" | "where">,
+  defaultSchema: string,
+): Seed[] {
   const { seedTable: tables, where } = opts;
   if (tables.length !== where.length) {
     throw new Error(
-      `every --seed-table needs a --where (got ${tables.length} table${tables.length === 1 ? "" : "s"} and ${where.length} where)`,
+      `every --seed-table needs a --where (got ${tables.length} --seed-table, ${where.length} --where)`,
     );
   }
   if (tables.length === 0)
     throw new Error("no seed: pass --seed-table <table> --where <sql> (repeat the pair for more)");
-  return tables.map((table, i) => ({ table: qualifyTable(table), where: where[i]! }));
+  return tables.map((table, i) => ({
+    table: qualifyTable(table, defaultSchema),
+    where: where[i]!,
+  }));
 }
 
 /** Everything a plan or sync needs from the command line, resolved. */
 async function subset(ctx: ProgramContext, opts: SubsetCommandOptions) {
   const source = ctx.userConfig.connectionUrl(opts.source);
-  const seedList = seeds(opts);
+  seeds(opts, "public"); // usage errors before any file or database work
   const schema = await loadRunSchema(ctx.cwd, opts.schema, (m) => ctx.stderr(`${pc.dim(m)}\n`));
   return {
     source,
-    seeds: seedList,
+    seeds: seeds(opts, schema?.defaultSchema ?? "public"),
     ...(schema && { schema }),
     ...(opts.traversal && { traversal: opts.traversal }),
     ...(opts.strictCycles && { strictCycles: true }),
@@ -135,10 +160,9 @@ export function createProgram(ctx: ProgramContext): Command {
   program
     .command("inspect")
     .description("print the source schema (tables, columns, keys) as JSON")
-    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
+    .addOption(sourceOption())
     .action(async (opts: { source: string }) => {
-      const schema = await inspect(ctx.userConfig.connectionUrl(opts.source));
-      ctx.stdout(`${JSON.stringify(schema, null, 2)}\n`);
+      ctx.stdout(`${JSON.stringify(await inspectSource(ctx, opts.source), null, 2)}\n`);
     });
 
   subsetOptions(program.command("plan"))
@@ -180,9 +204,9 @@ function addSchemaCommands(ctx: ProgramContext, program: Command): void {
   schema
     .command("init")
     .description(
-      "write a starting schema file from the source database, with guessed references commented out",
+      "write a starting schema file from the source database: every table, and its *_id columns to fill in",
     )
-    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
+    .addOption(sourceOption())
     .option("-o, --output <file>", "where to write it", "./schema.yaml")
     .addOption(
       new Option("--format <format>", "file format").choices(["yaml", "json"]).default("yaml"),
@@ -196,19 +220,23 @@ function addSchemaCommands(ctx: ProgramContext, program: Command): void {
         force?: boolean;
       }) => {
         const path = resolve(ctx.cwd, opts.output);
-        if (existsSync(path) && !opts.force) {
+        const template = schemaTemplate(await inspectSource(ctx, opts.source), {
+          format: opts.format,
+        });
+        mkdirSync(dirname(path), { recursive: true });
+        try {
+          // "wx" creates the file or fails, so a file that appeared meanwhile is never clobbered.
+          writeFileSync(path, template.text, { flag: opts.force ? "w" : "wx" });
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
           throw new Error(`${opts.output} already exists; pass --force to overwrite it`);
         }
-        const db = await inspect(ctx.userConfig.connectionUrl(opts.source));
-        const template = schemaTemplate(db, { format: opts.format });
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, template.text);
         ctx.stdout(
-          `wrote ${opts.output}: ${template.tables} tables, ${template.suggestions} guessed references to review\n`,
+          `wrote ${opts.output}: ${template.tables} tables, ${template.candidates} *_id columns to fill in\n`,
         );
         if (opts.format === "json") {
           ctx.stderr(
-            `${pc.dim("note: JSON can't hold comments, so guessed references are only written in the YAML format")}\n`,
+            `${pc.dim("note: JSON can't hold comments, so the *_id columns to fill in are only listed in the YAML format")}\n`,
           );
         }
       },
@@ -219,8 +247,10 @@ function addSchemaCommands(ctx: ProgramContext, program: Command): void {
     .description(
       "check a schema file's format, and with --source that its tables and columns exist",
     )
-    .option(SCHEMA_FLAG, SCHEMA_HELP)
-    .option(SOURCE_FLAG, "also check against this source connection's database")
+    .addOption(schemaOption())
+    .addOption(
+      sourceOption("also check that every table and column exists in this connection's database"),
+    )
     .action(async (opts: { schema?: string; source?: string }) => {
       const found = findSchemaFile(ctx.cwd, opts.schema);
       if (!found) {
@@ -231,9 +261,12 @@ function addSchemaCommands(ctx: ProgramContext, program: Command): void {
       let file: SchemaFile;
       try {
         file = await loadSchemaFile(found.path);
-        if (opts.source) buildGraph(await inspect(ctx.userConfig.connectionUrl(opts.source)), file);
       } catch (e) {
         throw relabel(e, found);
+      }
+      if (opts.source) {
+        const problems = checkSchemaFile(await inspectSource(ctx, opts.source), file);
+        if (problems.length) throw new SchemaFileError(problems, found.shown);
       }
       ctx.stdout(`${found.shown}: valid\n`);
     });
@@ -268,9 +301,9 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
     .command("ai")
     .description("describe what you want in plain language; tributary picks the command")
     .argument("<request...>", 'e.g. "copy the user admin@example.com and their orders"')
-    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
-    .option("-T, --target <name>", "target connection name, for a generated sync")
-    .option(SCHEMA_FLAG, SCHEMA_HELP)
+    .addOption(sourceOption())
+    .option("-T, --target <name>", "target connection name, needed for a generated sync")
+    .addOption(schemaOption())
     .option("-y, --yes", "run a generated sync without asking")
     .option("--dry-run", "only show the generated command")
     .action(
@@ -282,25 +315,21 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
         spinner.start("Reading the source schema");
         let command: Awaited<ReturnType<typeof generateCommand>>;
         try {
-          const db = await inspect(ctx.userConfig.connectionUrl(opts.source));
+          const db = await inspectSource(ctx, opts.source);
           spinner.message("Asking the model");
           command = await generateCommand(
             createModel(ctx.userConfig.all().ai),
             words.join(" "),
             db,
+            {
+              canSync: opts.target !== undefined,
+            },
           );
         } finally {
           spinner.stop();
         }
 
-        const args = toCliArgs(command);
-        if (command.command !== "inspect" && opts.schema) args.push("--schema", opts.schema);
-        args.push("--source", opts.source);
-        if (command.command === "sync") {
-          if (!opts.target)
-            throw new Error("the request needs a sync: pass --target <name> to say where to");
-          args.push("--target", opts.target);
-        }
+        const args = toCliArgs(command, opts);
         const warnings = command.warnings.map((w) => pc.yellow(`! ${w}`)).join("\n");
         p.note(
           [

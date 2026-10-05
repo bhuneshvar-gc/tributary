@@ -82,14 +82,14 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
 async function load(
   target: Queryable,
   options: SyncOptions,
-  { schema, closure, order, deferred }: Subset,
+  { catalog, closure, order, deferred }: Subset,
 ): Promise<SyncResult> {
-  const tables = new Map(schema.tables.map((t) => [tableId(t), t]));
+  const tables = new Map(catalog.tables.map((t) => [tableId(t), t]));
   const rowsOf = (id: NodeId) => [...closure.rows.get(id)!.values()];
   const deferredByTable = deferredColumns(deferred);
-  checkDeferrable(schema, deferred);
+  checkDeferrable(catalog, deferred);
 
-  const report = await ensureSchema(target, schema, order, options.createSchema ?? true);
+  const report = await ensureSchema(target, catalog, order, options.createSchema ?? true);
   await ensureStateSchema(target);
   const runId = runIdFor(options.source, options.seeds, subsetDefaults(options));
   await startRun(target, runId, options.fresh ?? false);

@@ -39,7 +39,7 @@ async function closureOf(
   try {
     return await computeClosure(client, graph, [{ table: `public.${table}`, where }], {
       ...options,
-      dependencyBreaks: file.dependencyBreaks,
+      cycleBreaks: file.cycleBreaks,
     });
   } finally {
     await client.end();

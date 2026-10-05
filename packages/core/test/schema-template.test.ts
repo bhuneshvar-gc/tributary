@@ -1,5 +1,4 @@
 import { describe, expect, test } from "vitest";
-import { parse as parseYaml } from "yaml";
 import { parseSchemaFile, schemaTemplate } from "../src/index.js";
 import { fk, schema, table } from "./support/schema.js";
 
@@ -14,83 +13,71 @@ const db = schema(
   table("billing.invoices", ["id", "customer_id"]),
 );
 
-/** The template with every guessed reference uncommented. */
-function accepted(text: string): string {
-  return text.replace(/^(\s*)# (\S+: \S+)\s+# guessed.*$/gm, "$1$2");
-}
-
 describe("schemaTemplate (yaml)", () => {
-  const { text, tables, suggestions } = schemaTemplate(db);
+  const { text, tables, candidates } = schemaTemplate(db);
 
   test("is a valid schema file that declares nothing until you uncomment", () => {
-    expect(parseSchemaFile(parseYaml(text))).toEqual({ relations: [], dependencyBreaks: [] });
+    expect(parseSchemaFile(text)).toMatchObject({ relations: [], cycleBreaks: [] });
     expect(text).toMatch(/^version: 1\ndefaultSchema: public\ntables:\n/m);
   });
 
-  test("lists every table, sorted: bare names in the default schema, qualified otherwise", () => {
+  test("lists every table, sorted and always schema-qualified, public included", () => {
     expect([...text.matchAll(/^ {2}(\S+):$/gm)].map((m) => m[1])).toEqual([
       "billing.invoices",
-      "categories",
-      "customers",
-      "order_management_v2_order_line_items",
-      "order_management_v2_orders",
-      "product_categories",
+      "public.categories",
+      "public.customers",
+      "public.order_management_v2_order_line_items",
+      "public.order_management_v2_orders",
+      "public.product_categories",
     ]);
     expect(tables).toBe(6);
-    expect(text).toContain("\n  customers:\n");
-    expect(text).toContain("\n  order_management_v2_orders:\n");
-    expect(text).toContain("\n  billing.invoices:\n");
   });
 
-  test("real foreign keys are shown as comments, never as guesses", () => {
+  test("real foreign keys are shown as comments with qualified targets, never as guesses", () => {
     expect(text).toContain(
-      "# customer_id -> customers.id  (database foreign key, followed already)",
+      "# customer_id -> public.customers.id  (database foreign key, followed already)",
     );
-    const orders = text.split("\n  order_management_v2_orders:\n")[1]!.split(/\n {2}\S/)[0]!;
+    const orders = text.split("\n  public.order_management_v2_orders:\n")[1]!.split(/\n {2}\S/)[0]!;
     expect(orders).not.toContain("# customer_id:");
   });
 
-  test("an *_id column without a foreign key gets a commented guess, prefixes and plurals included", () => {
-    expect(text).toMatch(
-      /# order_id: order_management_v2_orders\.id\s+# guessed from the column name/,
-    );
-    expect(text).toMatch(/# customer_id: customers\.id\s+# guessed/); // billing.invoices, across schemas
+  test("an *_id column without a foreign key is listed bare for you to fill in, with no guessed target", () => {
+    const items = text
+      .split("\n  public.order_management_v2_order_line_items:\n")[1]!
+      .split(/\n {2}\S/)[0]!;
+    expect(items).toBe("    references:\n      # order_id:\n      # category_id:");
+    expect(text).not.toContain("guess");
+    expect(text).not.toMatch(/# \w+_id: \S/);
   });
 
-  test("an ambiguous guess names the alternatives, and no match leaves a placeholder", () => {
-    expect(text).toMatch(
-      /# category_id: categories\.id\s+# guessed .*also: product_categories\.id/,
-    );
-    expect(text).toContain('# carrier_id:   # no table matches "carrier"; fill in "table.column"');
-    expect(suggestions).toBe(3);
+  test("counts the columns left to fill in", () => {
+    // invoices.customer_id, orders.carrier_id, line_items.order_id + category_id, categories.parent_id
+    expect(candidates).toBe(5);
   });
 
-  test("uncommented guesses become references", () => {
-    expect(parseSchemaFile(parseYaml(accepted(text))).relations).toMatchObject([
+  test("uncommenting a listed column and filling in its target makes a reference", () => {
+    const filled = text.replace("# order_id:", "order_id: public.order_management_v2_orders.id");
+    expect(parseSchemaFile(filled).relations).toMatchObject([
       {
-        from: { schema: "billing", table: "invoices", columns: ["customer_id"] },
-        to: { schema: "public", table: "customers", columns: ["id"] },
-      },
-      {
-        from: { table: "order_management_v2_order_line_items", columns: ["order_id"] },
-        to: { table: "order_management_v2_orders", columns: ["id"] },
-      },
-      {
-        from: { table: "order_management_v2_order_line_items", columns: ["category_id"] },
-        to: { table: "categories", columns: ["id"] },
+        from: {
+          schema: "public",
+          table: "order_management_v2_order_line_items",
+          columns: ["order_id"],
+        },
+        to: { schema: "public", table: "order_management_v2_orders", columns: ["id"] },
       },
     ]);
   });
 });
 
-test("schemaTemplate (json) is valid JSON listing every table, with no guesses", () => {
+test("schemaTemplate (json) is valid JSON listing every qualified table", () => {
   const { text, tables } = schemaTemplate(db, { format: "json" });
   const data = JSON.parse(text);
   expect(Object.keys(data.tables)).toHaveLength(tables);
   expect(data).toMatchObject({
     version: 1,
     defaultSchema: "public",
-    tables: { "billing.invoices": {} },
+    tables: { "billing.invoices": {}, "public.customers": {} },
   });
-  expect(parseSchemaFile(data)).toEqual({ relations: [], dependencyBreaks: [] });
+  expect(parseSchemaFile(data)).toMatchObject({ relations: [], cycleBreaks: [] });
 });

@@ -203,8 +203,27 @@ describe("seeds", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain(
-      "every --seed-table needs a --where (got 2 tables and 1 where)",
+      "every --seed-table needs a --where (got 2 --seed-table, 1 --where)",
     );
+  });
+
+  test("a bare seed table resolves in the schema file's defaultSchema", async () => {
+    const cli = cliWithSource();
+    writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\ndefaultSchema: billing\n");
+
+    const result = await cli.run(
+      "plan",
+      "--source",
+      "src",
+      "-t",
+      "invoice",
+      "-w",
+      "true",
+      "--json",
+    );
+
+    expect(result.stderr).not.toContain("no such table");
+    expect(result.code).toBe(0); // billing.invoice exists (empty); public.invoice doesn't
   });
 
   test("plan needs at least one seed", async () => {
@@ -225,19 +244,19 @@ describe("seeds", () => {
 });
 
 describe("schema init", () => {
-  test("writes ./schema.yaml from the source, with guesses commented out", async () => {
+  test("writes ./schema.yaml from the source, every table schema-qualified", async () => {
     const cli = cliWithSource();
 
     const result = await cli.run("schema", "init", "--source", "src");
 
     expect(result.code).toBe(0);
     const text = readFileSync(join(cli.cwd, "schema.yaml"), "utf8");
-    expect(text).toContain("\n  poly_source_table:\n");
+    expect(text).toContain("\n  public.poly_source_table:\n    references:\n      # target_id:\n");
     expect(text).toContain(
-      "# parent_id -> parent_table.id  (database foreign key, followed already)",
+      "# parent_id -> public.parent_table.id  (database foreign key, followed already)",
     );
     expect(result.stdout).toMatch(
-      /^wrote \.\/schema\.yaml: \d+ tables, \d+ guessed references to review\n$/,
+      /^wrote \.\/schema\.yaml: \d+ tables, \d+ \*_id columns to fill in\n$/,
     );
   });
 
@@ -313,6 +332,31 @@ describe("schema validate", () => {
     expect(result.stderr).toContain(
       'tables.leaf_table.references.nope_id: from=public.leaf_table.nope_id: no such column "nope_id" on "public.leaf_table"',
     );
+  });
+
+  test("with --source, a misspelled table is caught even with nothing declared under it", async () => {
+    const cli = cliWithSource();
+    writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\ntables:\n  public.leaf_tabel:\n");
+
+    const result = await cli.run("schema", "validate", "--source", "src");
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      'tables."public.leaf_tabel": no such table "public.leaf_tabel" in the database',
+    );
+  });
+
+  test("errors name the file as given, not its absolute path", async () => {
+    const cli = cliWithSource();
+    writeFileSync(
+      join(cli.cwd, "schema.yaml"),
+      "version: 1\ntables:\n  a: { references: { x: bad } }\n",
+    );
+
+    const result = await cli.run("schema", "validate");
+
+    expect(result.stderr).toContain("./schema.yaml: invalid schema file");
+    expect(result.stderr).not.toContain(cli.cwd);
   });
 
   test("with no file to validate, it says so", async () => {

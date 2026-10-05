@@ -108,7 +108,7 @@ describe("toCliArgs", () => {
       explanation: "copy that user",
       warnings: [],
     });
-    expect(toCliArgs(command)).toEqual([
+    expect(toCliArgs(command, { source: "prod", target: "local" })).toEqual([
       "sync",
       "--seed-table",
       "users",
@@ -117,6 +117,10 @@ describe("toCliArgs", () => {
       "--traversal",
       "full",
       "--fresh",
+      "--source",
+      "prod",
+      "--target",
+      "local",
     ]);
   });
 
@@ -130,7 +134,15 @@ describe("toCliArgs", () => {
       explanation: "",
       warnings: [],
     });
-    expect(toCliArgs(command)).toEqual(["plan", "--seed-table", "users", "--where", "id = 1"]);
+    expect(toCliArgs(command, { source: "prod" })).toEqual([
+      "plan",
+      "--seed-table",
+      "users",
+      "--where",
+      "id = 1",
+      "--source",
+      "prod",
+    ]);
   });
 });
 
@@ -149,5 +161,40 @@ describe("createModel", () => {
 
   test("defaults to Anthropic's model", () => {
     expect(createModel({ apiKey: "k" })).toMatchObject({ modelId: "claude-sonnet-5-5" });
+  });
+});
+
+describe("sync availability", () => {
+  test("without a target the model is told sync isn't available", () => {
+    expect(buildSystemPrompt(schema, { canSync: false })).toContain(
+      '"sync" is not available: no --target was given. Use "plan" instead',
+    );
+    expect(buildSystemPrompt(schema)).not.toContain("not available");
+  });
+
+  test("CLI args carry the source, schema file and target", () => {
+    const command = parseAiCommand({
+      command: "sync",
+      seedTable: "users",
+      where: "id = 1",
+      explanation: "",
+      warnings: [],
+    });
+    expect(toCliArgs(command, { source: "prod", target: "local", schema: "schema.yaml" })).toEqual([
+      "sync",
+      "--seed-table",
+      "users",
+      "--where",
+      "id = 1",
+      "--schema",
+      "schema.yaml",
+      "--source",
+      "prod",
+      "--target",
+      "local",
+    ]);
+    expect(
+      toCliArgs({ ...command, command: "inspect" }, { source: "prod", target: "local" }),
+    ).toEqual(["inspect", "--source", "prod"]);
   });
 });

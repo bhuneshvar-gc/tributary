@@ -1,8 +1,8 @@
 import { type ForeignKey, findColumn, type Schema, type Table, tableId } from "./catalog.js";
 import { type Closure, valuesKey } from "./closure.js";
-import type { TableColumn } from "./config.js";
 import { ident, type Queryable, qualified, type Row } from "./db.js";
 import type { Graph, NodeId } from "./graph.js";
+import type { TableColumn } from "./model.js";
 import type { DeferredColumns } from "./order.js";
 
 /**
@@ -16,9 +16,9 @@ export function deferredForeignKeys(
   schema: Schema,
   graph: Graph,
   closure: Pick<Closure, "rows" | "breaks">,
-  dependencyBreaks: TableColumn[] = [],
+  cycleBreaks: TableColumn[] = [],
 ): Map<NodeId, ForeignKey[]> {
-  const breaks: TableColumn[] = [...dependencyBreaks, ...closure.breaks];
+  const breaks: TableColumn[] = [...cycleBreaks, ...closure.breaks];
   const ignored = new Set(graph.ignored.map((e) => `${e.from}\0${e.constraintName}`));
   const deferred = new Map<NodeId, ForeignKey[]>();
   for (const t of schema.tables) {

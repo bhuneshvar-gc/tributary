@@ -1,12 +1,12 @@
 import type { ForeignKey, Schema } from "./catalog.js";
 import { type AppliedBreak, type Closure, computeClosure } from "./closure.js";
-import type { Seed, Traversal } from "./config.js";
 import { connect, type Queryable, readOnly } from "./db.js";
 import { buildGraph, type Graph, type NodeId } from "./graph.js";
 import { inspect } from "./inspect.js";
 import { deferredColumns, deferredForeignKeys } from "./load.js";
+import type { Seed, Traversal } from "./model.js";
 import { tableOrder } from "./order.js";
-import { EMPTY_SCHEMA_FILE, type SchemaFile } from "./schema-file.js";
+import { emptySchemaFile, type SchemaFile } from "./schema-file.js";
 
 /** How the subset is computed, beyond where it starts. */
 export interface SubsetOptions {
@@ -27,7 +27,7 @@ export interface PlanOptions extends SubsetOptions {
 /** SubsetOptions with every default filled in. */
 export function subsetDefaults(options: SubsetOptions): Required<SubsetOptions> {
   return {
-    schema: options.schema ?? EMPTY_SCHEMA_FILE,
+    schema: options.schema ?? emptySchemaFile(),
     traversal: options.traversal ?? "downstream",
     strictCycles: options.strictCycles ?? false,
   };
@@ -35,7 +35,8 @@ export function subsetDefaults(options: SubsetOptions): Required<SubsetOptions> 
 
 /** The subset to load, and everything derived from the source needed to load it. */
 export interface Subset {
-  schema: Schema;
+  /** The source database's catalog. */
+  catalog: Schema;
   graph: Graph;
   closure: Closure;
   /** Tables with rows, in load order. */
@@ -54,16 +55,16 @@ export async function computeSubset(
   options: SubsetOptions = {},
 ): Promise<Subset> {
   const { schema: file, traversal, strictCycles } = subsetDefaults(options);
-  const schema = await inspect(source);
-  const graph = buildGraph(schema, file);
+  const catalog = await inspect(source);
+  const graph = buildGraph(catalog, file);
   const closure = await computeClosure(source, graph, seeds, {
     traversal,
     strictCycles,
-    dependencyBreaks: file.dependencyBreaks,
+    cycleBreaks: file.cycleBreaks,
   });
-  const deferred = deferredForeignKeys(schema, graph, closure, file.dependencyBreaks);
-  const order = tableOrder(schema, closure.rows.keys(), deferredColumns(deferred));
-  return { schema, graph, closure, order, deferred };
+  const deferred = deferredForeignKeys(catalog, graph, closure, file.cycleBreaks);
+  const order = tableOrder(catalog, closure.rows.keys(), deferredColumns(deferred));
+  return { catalog, graph, closure, order, deferred };
 }
 
 export interface PlanTable {
