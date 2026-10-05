@@ -1,0 +1,41 @@
+{
+  "name": "@bhuneshvar-k/tributary-core",
+  "version": "0.1.0",
+  "description": "Referentially-consistent Postgres subsetting & sync engine",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhuneshvar-k/tributary.git",
+    "directory": "packages/core"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "exports": {
+    ".": {
+      "@bhuneshvar-k/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "pg": "^8.23.1",
+    "pg-connection-string": "^2.14.1",
+    "pg-format": "^1.0.4",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "@types/pg": "^8.23.1",
+    "@types/pg-format": "^1.0.5"
+  }
+}

@@ -1,0 +1,140 @@
+import type { Schema } from "@bhuneshvar-k/tributary-core";
+import { describe, expect, test } from "vitest";
+import { buildSystemPrompt, parseAiCommand, toCliArgs } from "../src/ai.js";
+
+const schema: Schema = {
+  tables: [
+    {
+      schema: "public",
+      name: "users",
+      primaryKey: ["id"],
+      columns: [
+        {
+          name: "id",
+          type: "integer",
+          udtName: "int4",
+          sqlType: "integer",
+          nullable: false,
+        },
+        {
+          name: "email",
+          type: "text",
+          udtName: "text",
+          sqlType: "text",
+          nullable: true,
+        },
+        {
+          name: "company_id",
+          type: "integer",
+          udtName: "int4",
+          sqlType: "integer",
+          nullable: true,
+        },
+      ],
+      foreignKeys: [
+        {
+          constraintName: "users_company_fk",
+          fromTable: "public.users",
+          fromColumns: ["company_id"],
+          toTable: "public.companies",
+          toColumns: ["id"],
+        },
+      ],
+    },
+  ],
+  enums: { user_role: ["admin", "member"] },
+};
+
+describe("buildSystemPrompt", () => {
+  test("describes the commands even without a schema", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain('"plan"');
+    expect(prompt).toContain('"sync"');
+    expect(prompt).not.toContain("Database schema");
+  });
+
+  test("lists tables, keys, columns, foreign keys and enums", () => {
+    const prompt = buildSystemPrompt(schema);
+    expect(prompt).toContain("Database schema");
+    expect(prompt).toContain("public.users (primary key: id)");
+    expect(prompt).toContain("- email: text, nullable");
+    expect(prompt).toContain("- id: integer\n");
+    expect(prompt).toContain("company_id -> public.companies.id");
+    expect(prompt).toContain("user_role: admin, member");
+  });
+});
+
+describe("parseAiCommand", () => {
+  test("a plan needs a seed table and predicate", () => {
+    expect(() =>
+      parseAiCommand({
+        command: "plan",
+        seedTable: "users",
+        where: null,
+        explanation: "x",
+        warnings: [],
+      }),
+    ).toThrow(/plan needs a seed table and a where predicate/);
+  });
+
+  test("inspect needs no seed", () => {
+    expect(
+      parseAiCommand({
+        command: "inspect",
+        seedTable: null,
+        where: null,
+        explanation: "show schema",
+        warnings: [],
+      }),
+    ).toMatchObject({ command: "inspect" });
+  });
+
+  test("an unknown command is rejected", () => {
+    expect(() =>
+      parseAiCommand({ command: "drop", explanation: "", warnings: [] }),
+    ).toThrow();
+  });
+});
+
+describe("toCliArgs", () => {
+  test("maps a sync command to the equivalent CLI invocation", () => {
+    const command = parseAiCommand({
+      command: "sync",
+      seedTable: "users",
+      where: "email = 'a@b.co'",
+      traversal: "full",
+      fresh: true,
+      explanation: "copy that user",
+      warnings: [],
+    });
+    expect(toCliArgs(command)).toEqual([
+      "sync",
+      "--seed-table",
+      "users",
+      "--where",
+      "email = 'a@b.co'",
+      "--traversal",
+      "full",
+      "--fresh",
+    ]);
+  });
+
+  test("leaves defaults off", () => {
+    const command = parseAiCommand({
+      command: "plan",
+      seedTable: "users",
+      where: "id = 1",
+      traversal: null,
+      fresh: null,
+      explanation: "",
+      warnings: [],
+    });
+    expect(toCliArgs(command)).toEqual([
+      "plan",
+      "--seed-table",
+      "users",
+      "--where",
+      "id = 1",
+    ]);
+  });
+});

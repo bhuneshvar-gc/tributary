@@ -29,19 +29,21 @@ users, so there is no compatibility contract.
 
 ### Toolchain
 
-| Concern | Choice |
-|---|---|
-| Runtime | Node ≥ 22 (active + maintenance LTS) |
-| Modules | ESM-only, TS `strict` |
-| Package manager | pnpm workspaces |
-| Library build | tsup |
-| Tests | vitest + testcontainers-node (Postgres) |
-| Lint / format | Biome |
-| CLI framework | commander |
-| Config parsing | `yaml` + zod |
-| Project config loader | jiti |
-| Postgres | `pg` + `pg-copy-streams` (`pg-logical-replication` reserved for phase 4) |
-| AI | Vercel AI SDK (`ai` + provider packages) |
+| Concern               | Choice                                                                     |
+| --------------------- | -------------------------------------------------------------------------- |
+| Runtime               | Node ≥ 22.12 (active + maintenance LTS; commander 15 needs 22.12)          |
+| Modules               | ESM-only, TS `strict`                                                      |
+| Package manager       | pnpm workspaces                                                            |
+| Library build         | `tsc` (TypeScript 6)                                                       |
+| Tests                 | vitest + PGlite over `pglite-socket` (real Postgres in-process, no Docker) |
+| Lint / format         | Biome                                                                      |
+| CLI framework         | commander                                                                  |
+| Config parsing        | zod                                                                        |
+| Project config loader | c12 (uses jiti; also loads .json/.yaml)                                    |
+| Postgres              | `pg` + `pg-format` (`pg-logical-replication` reserved for phase 4)         |
+| AI                    | Vercel AI SDK v7 structured output (`generateText` + `Output.object`)      |
+| CLI UX                | `@clack/prompts`, `cli-table3`, `picocolors`                               |
+| Local user config     | `conf`                                                                     |
 
 ### Configuration (two layers)
 
@@ -54,6 +56,7 @@ users, so there is no compatibility contract.
 
    Secrets are stored in plaintext and shown unmasked (an accepted
    trade-off).
+
 2. **Project config**: `tributary.config.ts`, committed alongside the app:
 
    ```ts
@@ -98,7 +101,8 @@ users, so there is no compatibility contract.
   API, not copied verbatim. Covered areas: closure (incl. downstream-only
   default), declared relations, load/upsert, DDL/schema auto-create (incl.
   enums), AI prompt/parser, version handling.
-- Integration tests run against testcontainers Postgres using
+- Integration tests run against PGlite (real Postgres compiled to WASM)
+  exposed over the wire protocol, two instances per test, using
   production-shaped fixtures (enums, composite PKs, declared relations).
 
 ### Release
@@ -113,23 +117,23 @@ users, so there is no compatibility contract.
 
 **0.1.0 ships:** phases 0–2 + AI.
 
-| # | Phase | Status |
-|---|-------|--------|
-| 0 | Schema introspection (`tributary inspect`) | not started |
-| 1 | FK graph & subset closure incl. declared relations (`tributary plan`) | not started |
-| 2 | One-shot export + load: COPY → staging → `INSERT … ON CONFLICT DO UPDATE` upsert, schema auto-create (columns, types, NOT NULL, PK, FK, enums), resume, `--fresh` (`tributary sync`) | not started |
-| — | Natural-language interface (`tributary ai`) | not started |
-| 3 | Masking & transform pipeline | later |
-| 4 | Incremental sync via logical replication | later |
-| 5 | Observability & hardening | later |
-| 6 | Lightweight branching (stretch) | later |
+| #   | Phase                                                                                                                                                                       | Status |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| 0   | Schema introspection (`tributary inspect`)                                                                                                                                  | done   |
+| 1   | FK graph & subset closure incl. declared relations (`tributary plan`)                                                                                                       | done   |
+| 2   | One-shot export + load: batched `INSERT … ON CONFLICT DO UPDATE` upsert, schema auto-create (columns, types, NOT NULL, PK, FK, enums), resume, `--fresh` (`tributary sync`) | done   |
+| —   | Natural-language interface (`tributary ai`)                                                                                                                                 | done   |
+| 3   | Masking & transform pipeline                                                                                                                                                | later  |
+| 4   | Incremental sync via logical replication                                                                                                                                    | later  |
+| 5   | Observability & hardening                                                                                                                                                   | later  |
+| 6   | Lightweight branching (stretch)                                                                                                                                             | later  |
 
 **Explicitly cut (unchanged from the Go plan):** automatic merge of
 diverged branches, a custom CoW storage engine, non-Postgres sources.
 
 ## Build order
 
-1. Workspace scaffold (pnpm, tsup, Biome, vitest, CI)
+1. Workspace scaffold (pnpm, tsc, Biome, vitest, CI)
 2. Config: zod schemas, `defineConfig`, local JSON store, `config set/get/list`
 3. Catalog: schema introspection (tables, columns, PKs, FKs, enums)
 4. Graph & closure: FK graph merged with declared relations
@@ -147,3 +151,33 @@ diverged branches, a custom CoW storage engine, non-Postgres sources.
 The Go implementation lives in `../tributary-go`. Its `docs/PLAN.md` holds
 the original rationale, the phase-1 downstream-only traversal revision,
 and the phase-2 upsert / schema auto-create notes.
+
+## Implementation notes (0.1.0)
+
+Decisions made while building, superseding the tables above where they differ:
+
+- **No COPY.** Rows are read with every pg type parser disabled, so values
+  are Postgres's own text output, and written back as untyped parameters
+  in batched `INSERT … ON CONFLICT (pk) DO UPDATE` statements, which the
+  target parses with its input functions. This keeps timestamps'
+  microseconds, bigint/numeric precision, JSON, arrays and bytea exact
+  (pg's default parsing loses some of these), needs no staging table, and
+  works over PGlite. COPY can come back later as a throughput optimization.
+- **Exact column types.** `inspect` records each column's `format_type()`
+  (`sqlType`), and auto-created target tables use it verbatim instead of
+  rebuilding type names from information_schema.
+- **Deferred columns generalize self-references.** A real FK is loaded
+  NULL and backfilled after all tables when it's a self-reference, a
+  configured or auto-applied cycle break, or a constraint hidden by an
+  `ignore` relation. Load order comes from catalog constraints only,
+  restricted to the tables in the subset, so cycles elsewhere in the
+  schema don't block a sync.
+- **One break per cycle.** When a configured dependency break already
+  cuts a multi-table cycle, the walk follows that cycle's other edges
+  instead of auto-breaking each one (the Go walker broke them all).
+- **Failed runs resume.** An unfinished run (interrupted _or_ failed)
+  resumes from its completed tables; only a completed run or `--fresh`
+  starts over.
+- **Not handled yet:** generated columns and identity `ALWAYS` columns on
+  a pre-provisioned target; closure fetches are one query per row and
+  edge (batching is a phase 5 item).

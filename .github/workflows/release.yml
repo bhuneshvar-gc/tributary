@@ -1,0 +1,36 @@
+name: Release
+
+# Publishes both packages to npm when a v* tag is pushed, via npm trusted
+# publishing (OIDC): no NPM_TOKEN secret exists. Each package must have
+# this repo + workflow registered as a trusted publisher on npmjs.com.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm test && pnpm build
+      # pnpm pack rewrites workspace:* dependencies to real versions;
+      # npm publish then authenticates with the workflow's OIDC token.
+      - name: Publish
+        run: |
+          for pkg in core cli; do
+            (cd packages/$pkg && pnpm pack --pack-destination ../../dist-pack)
+          done
+          for tarball in dist-pack/*.tgz; do
+            npm publish "$tarball" --provenance --access public
+          done
