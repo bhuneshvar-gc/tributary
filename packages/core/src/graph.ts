@@ -1,4 +1,4 @@
-import { type Schema, type Table, tableId } from "./catalog.js";
+import { findColumn, type Schema, type Table, tableId } from "./catalog.js";
 import {
   type ColumnRef,
   ConfigError,
@@ -45,9 +45,7 @@ export interface PolymorphicReverse {
 }
 
 export function edgeTargets(e: Edge): NodeId[] {
-  return e.kind === "fixed"
-    ? [e.to]
-    : Object.values(e.targets).map((t) => t.to);
+  return e.kind === "fixed" ? [e.to] : Object.values(e.targets).map((t) => t.to);
 }
 
 /**
@@ -90,9 +88,7 @@ export class Graph {
   inCycle(e: Edge): boolean {
     const component = this.component.get(e.from);
     return edgeTargets(e).some(
-      (to) =>
-        to === e.from ||
-        (component !== undefined && this.component.get(to) === component),
+      (to) => to === e.from || (component !== undefined && this.component.get(to) === component),
     );
   }
 
@@ -184,8 +180,7 @@ function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
  */
 export function buildGraph(
   schema: Schema,
-  config?: Pick<ProjectConfig, "relations"> &
-    Partial<Pick<ProjectConfig, "dependencyBreaks">>,
+  config?: Pick<ProjectConfig, "relations"> & Partial<Pick<ProjectConfig, "dependencyBreaks">>,
 ): Graph {
   const g = new Graph();
   for (const t of schema.tables) g.tables.set(tableId(t), t);
@@ -256,10 +251,7 @@ function mergeRelation(g: Graph, r: Relation): string | undefined {
         fromColumns: r.from.columns,
         typeColumn: r.typeColumn.columns[0]!,
         targets: Object.fromEntries(
-          Object.entries(r.targets).map(([v, t]) => [
-            v,
-            { to: tableKey(t), toColumns: t.columns },
-          ]),
+          Object.entries(r.targets).map(([v, t]) => [v, { to: tableKey(t), toColumns: t.columns }]),
         ),
       });
       return;
@@ -268,15 +260,12 @@ function mergeRelation(g: Graph, r: Relation): string | undefined {
       const id = tableKey(r.column);
       const column = r.column.columns[0]!;
       const label = `ignore=${formatRef(r.column)}`;
-      if (!g.table(id))
-        return `${label}: no such table "${id}" in source schema`;
+      if (!g.table(id)) return `${label}: no such table "${id}" in source schema`;
       const matches = g
         .outgoing(id)
         .filter(
           (e): e is FixedEdge =>
-            e.kind === "fixed" &&
-            e.source === "catalog" &&
-            e.fromColumns.includes(column),
+            e.kind === "fixed" && e.source === "catalog" && e.fromColumns.includes(column),
         );
       if (matches.length === 0)
         return `${label}: no catalog foreign key on "${id}" uses column "${column}"`;
@@ -295,8 +284,6 @@ function checkRef(g: Graph, field: string, ref: ColumnRef): string | undefined {
   const t = g.table(id);
   const label = `${field}=${formatRef(ref)}`;
   if (!t) return `${label}: no such table "${id}" in source schema`;
-  const missing = ref.columns.find(
-    (c) => !t.columns.some((col) => col.name === c),
-  );
+  const missing = ref.columns.find((c) => !findColumn(t, c));
   if (missing) return `${label}: no such column "${missing}" on "${id}"`;
 }

@@ -66,10 +66,14 @@ export async function ensureStateSchema(db: Queryable): Promise<void> {
  * fresh run starts over.
  */
 export async function startRun(db: Queryable, id: string, fresh: boolean): Promise<void> {
-  const { rows } = await db.query(`SELECT status FROM ${STATE_SCHEMA}.runs WHERE run_id = $1`, [id]);
+  const { rows } = await db.query(`SELECT status FROM ${STATE_SCHEMA}.runs WHERE run_id = $1`, [
+    id,
+  ]);
   const status = rows[0]?.status as RunStatus | undefined;
   if (status === undefined) {
-    await db.query(`INSERT INTO ${STATE_SCHEMA}.runs (run_id, status) VALUES ($1, 'in_progress')`, [id]);
+    await db.query(`INSERT INTO ${STATE_SCHEMA}.runs (run_id, status) VALUES ($1, 'in_progress')`, [
+      id,
+    ]);
     return;
   }
   if (status === "completed" || fresh) {

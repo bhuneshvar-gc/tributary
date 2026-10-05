@@ -1,12 +1,5 @@
 import { customType, findColumn, type Schema, type Table, tableId } from "./catalog.js";
-import {
-  ident,
-  literal,
-  type Queryable,
-  qualified,
-  splitQualified,
-  transaction,
-} from "./db.js";
+import { ident, literal, type Queryable, qualified, splitQualified, transaction } from "./db.js";
 import type { NodeId } from "./graph.js";
 import { inspect } from "./inspect.js";
 
@@ -52,7 +45,8 @@ export async function ensureSchema(
   const missing: Table[] = [];
   for (const id of [...tables].sort()) {
     const src = sourceTables.get(id);
-    if (!src) throw new Error(`internal error: ${id} has rows but is missing from the source schema`);
+    if (!src)
+      throw new Error(`internal error: ${id} has rows but is missing from the source schema`);
     const tgt = existing.get(id);
     if (tgt) checkCompatible(tgt, src);
     else missing.push(src);
@@ -104,9 +98,12 @@ function checkCompatible(target: Table, source: Table): void {
   const id = tableId(source);
   for (const sc of source.columns) {
     const tc = findColumn(target, sc.name);
-    if (!tc) throw new Error(`target table ${id} is missing column "${sc.name}" that the source has`);
+    if (!tc)
+      throw new Error(`target table ${id} is missing column "${sc.name}" that the source has`);
     if (sc.nullable && !tc.nullable) {
-      throw new Error(`target table ${id}: column "${sc.name}" is nullable in source but NOT NULL on target`);
+      throw new Error(
+        `target table ${id}: column "${sc.name}" is nullable in source but NOT NULL on target`,
+      );
     }
   }
 }
@@ -142,14 +139,18 @@ async function ensureTypes(
         `column ${usedBy} uses type "${type}", which doesn't exist on the target and isn't an enum; create it there first (tributary auto-creates enums, not domains, composites or ranges)`,
       );
     }
-    await target.query(`CREATE TYPE ${qualified(type)} AS ENUM (${labels.map(literal).join(", ")})`);
+    await target.query(
+      `CREATE TYPE ${qualified(type)} AS ENUM (${labels.map(literal).join(", ")})`,
+    );
     created.push(type);
   }
   return created;
 }
 
 function createTableSql(t: Table): string {
-  const lines = t.columns.map((c) => `${ident(c.name)} ${c.sqlType}${c.nullable ? "" : " NOT NULL"}`);
+  const lines = t.columns.map(
+    (c) => `${ident(c.name)} ${c.sqlType}${c.nullable ? "" : " NOT NULL"}`,
+  );
   if (t.primaryKey.length) lines.push(`PRIMARY KEY (${t.primaryKey.map(ident).join(", ")})`);
   return `CREATE TABLE ${qualified(tableId(t))} (\n  ${lines.join(",\n  ")}\n)`;
 }

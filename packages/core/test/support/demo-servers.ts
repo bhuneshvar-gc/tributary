@@ -5,9 +5,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 
 const source = await PGlite.create();
-await source.exec(
-  readFileSync(new URL("../fixtures/source.sql", import.meta.url), "utf8"),
-);
+await source.exec(readFileSync(new URL("../fixtures/source.sql", import.meta.url), "utf8"));
 await source.exec(`
   insert into parent_table values (1, 'p1'), (2, 'p2');
   insert into child_table values (10, 1, 'c10'), (11, 1, 'c11'), (20, 2, 'c20');

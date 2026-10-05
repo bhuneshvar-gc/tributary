@@ -31,7 +31,10 @@ import { defineConfig } from "@bhuneshvar-k/tributary";
 export default defineConfig({
   source: "prod",
   target: "local",
-  seed: { table: "users", where: "email = 'admin@example.com'" },
+  seeds: [
+    { table: "users", where: "email = 'admin@example.com'" },
+    { table: "feature_flags", where: "true" },
+  ],
   relations: [
     // app-level FKs pg_catalog can't see
     { from: "orders.customer_ref", to: "users.id" },
@@ -56,11 +59,14 @@ export default defineConfig({
 ```sh
 tributary plan                 # row counts per table, writes nothing
 tributary sync                 # copy the subset into the target
-tributary sync -t orders -w "id = 42"   # override the seed
+tributary sync -t orders -w "id = 42"   # one seed instead of the configured ones
 tributary ai "copy the user admin@example.com and their orders"
 ```
 
 `.json` and `.yaml` config files work too (`tributary.config.json`, ...).
+
+AI providers: `anthropic` (default), `openai`, `google`, `openrouter` (set `ai.model`)
+and `opencode` (an OpenAI-compatible endpoint; set `ai.baseUrl` and `ai.model`).
 
 ## How it behaves
 
@@ -71,9 +77,12 @@ tributary ai "copy the user admin@example.com and their orders"
 - **Re-runs upsert.** A row that's already on the target is updated to match the
   source. `--fresh` deletes exactly the subset's rows first (never a TRUNCATE).
 - **Resume.** Each table commits with its checkpoint in the target's `_tributary`
-  schema, so an interrupted sync continues where it stopped.
+  schema, so an interrupted or failed sync continues where it stopped. A table is
+  only skipped if its rows are unchanged since; one whose source rows changed is
+  reloaded.
 - **Schema auto-create.** Missing target tables are created with the source's exact
-  column types, NOT NULL, primary keys, foreign keys and enum types. Defaults,
+  column types, NOT NULL, primary keys, foreign keys and enum types (in their own
+  schemas, including enums only used in arrays). Defaults,
   sequences, checks, indexes, triggers and non-enum custom types are not copied.
 - **Cycles.** Self-references and broken cycles are loaded NULL and backfilled where
   the referenced row is in the subset; otherwise they stay NULL.
@@ -82,10 +91,14 @@ tributary ai "copy the user admin@example.com and their orders"
 
 ## Safety
 
-- Every source query runs in a `READ ONLY` `REPEATABLE READ` transaction: a
-  consistent snapshot, and a seed predicate can't write to production.
+- Every source query, `inspect` included, runs in a `READ ONLY` `REPEATABLE READ`
+  transaction: a consistent snapshot, and nothing can write to production. Seed
+  predicates are sent as a single statement, so `id = 1; COMMIT; DELETE ...` is
+  rejected rather than run.
 - `sync` refuses a target whose host isn't on the allowlist (empty denies all) and
-  refuses to sync a database into itself.
+  refuses to sync a database into itself: matched by server start time and database
+  identity (so a pooler and a direct connection to the same database still match),
+  and by cluster system identifier where the role can read it (catching a replica).
 - `tributary ai` shows the generated command and asks before any sync (`--yes` skips).
 - The local config file stores connection strings and API keys in **plaintext**.
   Keep it out of shared machines and backups you don't control.
@@ -100,7 +113,7 @@ import { parseProjectConfig, plan, sync } from "@bhuneshvar-k/tributary-core";
 const result = await sync({
   source: process.env.SOURCE_URL!,
   target: process.env.TARGET_URL!,
-  seed: { table: "public.users", where: "id = 42" },
+  seeds: [{ table: "public.users", where: "id = 42" }],
   config: parseProjectConfig({ relations: [] }),
   allowlist: ["localhost"],
 });

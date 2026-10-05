@@ -31,12 +31,7 @@ async function closureOf(
   const graph = buildGraph(await inspect(db.source.url), config);
   const client = await connect(db.source.url);
   try {
-    return await computeClosure(
-      client,
-      graph,
-      [{ table: `public.${table}`, where }],
-      config,
-    );
+    return await computeClosure(client, graph, [{ table: `public.${table}`, where }], config);
   } finally {
     await client.end();
   }
@@ -116,9 +111,7 @@ describe("traversal", () => {
       insert into shared_table values (100);
       insert into member_table values (1, 1, 100), (2, 2, 100);`);
 
-    expect(
-      ids(await closureOf("parent_table", "id = 1", { traversal: "full" })),
-    ).toEqual({
+    expect(ids(await closureOf("parent_table", "id = 1", { traversal: "full" }))).toEqual({
       "public.parent_table": ["1", "2"],
       "public.member_table": ["1", "2"],
       "public.shared_table": ["100"],
@@ -133,18 +126,14 @@ test("a composite foreign key pairs its columns correctly", async () => {
     insert into composite_child_table values (1, 5, 2, 'sku');`);
 
   const closure = await closureOf("composite_child_table", "id = 1");
-  const parents = [
-    ...closure.rows.get("public.composite_parent_table")!.values(),
-  ];
+  const parents = [...closure.rows.get("public.composite_parent_table")!.values()];
   expect(parents.map((r) => r.name)).toEqual(["tenant2-5"]);
   expect(ids(closure)["public.tenant_table"]).toEqual(["2"]);
 });
 
 describe("cycles", () => {
   test("a self-reference is auto-broken and reported", async () => {
-    await db.source.exec(
-      `insert into self_ref_table values (1, null), (2, 1), (3, 2);`,
-    );
+    await db.source.exec(`insert into self_ref_table values (1, null), (2, 1), (3, 2);`);
 
     const closure = await closureOf("self_ref_table", "id = 2");
     expect(closure.breaks).toEqual([
@@ -155,9 +144,7 @@ describe("cycles", () => {
   });
 
   test("a configured dependency break is applied, not auto", async () => {
-    await db.source.exec(
-      `insert into self_ref_table values (1, null), (2, 1);`,
-    );
+    await db.source.exec(`insert into self_ref_table values (1, null), (2, 1);`);
 
     const closure = await closureOf("self_ref_table", "id = 2", {
       dependencyBreaks: [{ table: "self_ref_table", column: "next_id" }],
@@ -168,22 +155,19 @@ describe("cycles", () => {
   });
 
   test("strict cycles fail instead of guessing", async () => {
-    await db.source.exec(
-      `insert into self_ref_table values (1, null), (2, 1);`,
-    );
+    await db.source.exec(`insert into self_ref_table values (1, null), (2, 1);`);
 
-    await expect(
-      closureOf("self_ref_table", "id = 2", { strictCycles: true }),
-    ).rejects.toThrow(/unresolved cycle: public\.self_ref_table\.next_id/);
+    await expect(closureOf("self_ref_table", "id = 2", { strictCycles: true })).rejects.toThrow(
+      /unresolved cycle: public\.self_ref_table\.next_id/,
+    );
   });
 
   test("a root row with a null reference uses up no break", async () => {
     await db.source.exec(`insert into self_ref_table values (1, null);`);
 
-    expect(
-      (await closureOf("self_ref_table", "id = 1", { strictCycles: true }))
-        .breaks,
-    ).toEqual([]);
+    expect((await closureOf("self_ref_table", "id = 1", { strictCycles: true })).breaks).toEqual(
+      [],
+    );
   });
 });
 
@@ -194,9 +178,7 @@ describe("polymorphic associations", () => {
       insert into poly_target_b values (1, 'b1'), (2, 'b2');
       insert into poly_source_table values (1, 'A', 1), (2, 'B', 2);`);
 
-    expect(
-      ids(await closureOf("poly_source_table", "true", polymorphic)),
-    ).toEqual({
+    expect(ids(await closureOf("poly_source_table", "true", polymorphic))).toEqual({
       "public.poly_source_table": ["1", "2"],
       "public.poly_target_a": ["1"],
       "public.poly_target_b": ["2"],
@@ -209,9 +191,7 @@ describe("polymorphic associations", () => {
       insert into poly_target_b values (1, 'b1');
       insert into poly_source_table values (1, 'A', 1), (2, 'B', 1);`);
 
-    expect(
-      ids(await closureOf("poly_target_a", "id = 1", polymorphic)),
-    ).toEqual({
+    expect(ids(await closureOf("poly_target_a", "id = 1", polymorphic))).toEqual({
       "public.poly_target_a": ["1"],
       "public.poly_source_table": ["1"],
     });
@@ -229,7 +209,5 @@ describe("polymorphic associations", () => {
 });
 
 test("an unknown seed table is an error", async () => {
-  await expect(closureOf("nope", "true")).rejects.toThrow(
-    /no such table "public\.nope"/,
-  );
+  await expect(closureOf("nope", "true")).rejects.toThrow(/no such table "public\.nope"/);
 });

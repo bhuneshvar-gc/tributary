@@ -70,10 +70,17 @@ function chunk<T>(items: T[], width: number): T[][] {
  * values to `t`'s key columns. Explicit casts are needed here: unlike an
  * INSERT's VALUES, a joined VALUES list has no target column types to infer.
  */
-function keyedValues(t: Table, keyColumns: string[], extraColumns: string[], rows: (string | null)[][]) {
+function keyedValues(
+  t: Table,
+  keyColumns: string[],
+  extraColumns: string[],
+  rows: (string | null)[][],
+) {
   const types = [...keyColumns, ...extraColumns].map((c) => findColumn(t, c)!.sqlType);
   const params: (string | null)[] = [];
-  const tuples = rows.map((r) => `(${r.map((v, i) => `$${params.push(v)}::${types[i]}`).join(", ")})`);
+  const tuples = rows.map(
+    (r) => `(${r.map((v, i) => `$${params.push(v)}::${types[i]}`).join(", ")})`,
+  );
   const aliases = types.map((_, i) => `v${i}`).join(", ");
   return {
     from: `(VALUES ${tuples.join(", ")}) AS v(${aliases})`,
@@ -105,7 +112,8 @@ export async function upsertRows(
   for (const batch of chunk(rows, columns.length)) {
     const params: (string | null)[] = [];
     const tuples = batch.map(
-      (row) => `(${columns.map((c) => `$${params.push(deferred.has(c) ? null : (row[c] ?? null))}`).join(", ")})`,
+      (row) =>
+        `(${columns.map((c) => `$${params.push(deferred.has(c) ? null : (row[c] ?? null))}`).join(", ")})`,
     );
     const result = await db.query(
       `INSERT INTO ${qualified(tableId(t))} (${columns.map(ident).join(", ")}) VALUES ${tuples.join(", ")}
@@ -150,7 +158,9 @@ export async function backfill(
     }
     for (const batch of chunk(restore, t.primaryKey.length + fk.fromColumns.length)) {
       const v = keyedValues(t, t.primaryKey, fk.fromColumns, batch);
-      const set = fk.fromColumns.map((c, i) => `${ident(c)} = v.v${t.primaryKey.length + i}`).join(", ");
+      const set = fk.fromColumns
+        .map((c, i) => `${ident(c)} = v.v${t.primaryKey.length + i}`)
+        .join(", ");
       const updated = await db.query(
         `UPDATE ${qualified(tableId(t))} AS t SET ${set} FROM ${v.from} WHERE ${v.on}`,
         v.params,
@@ -170,7 +180,10 @@ export async function deleteRows(db: Queryable, t: Table, rows: Row[]): Promise<
       [],
       batch.map((r) => t.primaryKey.map((c) => r[c] ?? null)),
     );
-    await db.query(`DELETE FROM ${qualified(tableId(t))} AS t USING ${v.from} WHERE ${v.on}`, v.params);
+    await db.query(
+      `DELETE FROM ${qualified(tableId(t))} AS t USING ${v.from} WHERE ${v.on}`,
+      v.params,
+    );
   }
 }
 

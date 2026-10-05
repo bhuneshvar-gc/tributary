@@ -15,36 +15,21 @@ describe("tableOrder", () => {
   test("parents load before children, ties broken alphabetically", () => {
     const s = schema(orders, users, companies, audit);
     expect(
-      tableOrder(s, [
-        "public.orders",
-        "public.users",
-        "public.companies",
-        "public.audit",
-      ]),
-    ).toEqual([
-      "public.audit",
-      "public.companies",
-      "public.users",
-      "public.orders",
-    ]);
+      tableOrder(s, ["public.orders", "public.users", "public.companies", "public.audit"]),
+    ).toEqual(["public.audit", "public.companies", "public.users", "public.orders"]);
   });
 
   test("a self-reference doesn't constrain ordering", () => {
     const employees = table("public.employees", ["id", "manager_id"], {
       fks: [fk("employees_manager_fk", ["manager_id"], "public.employees")],
     });
-    expect(tableOrder(schema(employees), ["public.employees"])).toEqual([
-      "public.employees",
-    ]);
+    expect(tableOrder(schema(employees), ["public.employees"])).toEqual(["public.employees"]);
   });
 
   test("only constraints between the tables being loaded count", () => {
-    expect(
-      tableOrder(schema(orders, users, companies), [
-        "public.orders",
-        "public.users",
-      ]),
-    ).toEqual(["public.users", "public.orders"]);
+    expect(tableOrder(schema(orders, users, companies), ["public.orders", "public.users"])).toEqual(
+      ["public.users", "public.orders"],
+    );
   });
 
   describe("a multi-table cycle", () => {
@@ -64,9 +49,10 @@ describe("tableOrder", () => {
 
     test("orders once one of its columns is deferred", () => {
       const deferred = new Map([["public.teams", new Set(["lead_id"])]]);
-      expect(
-        tableOrder(s, ["public.teams", "public.members"], deferred),
-      ).toEqual(["public.teams", "public.members"]);
+      expect(tableOrder(s, ["public.teams", "public.members"], deferred)).toEqual([
+        "public.teams",
+        "public.members",
+      ]);
     });
   });
 });

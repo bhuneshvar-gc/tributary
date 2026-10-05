@@ -26,9 +26,7 @@ export type Relation =
 
 export class ConfigError extends Error {
   constructor(readonly issues: string[]) {
-    super(
-      `invalid tributary config:\n${issues.map((i) => `  - ${i}`).join("\n")}`,
-    );
+    super(`invalid tributary config:\n${issues.map((i) => `  - ${i}`).join("\n")}`);
     this.name = "ConfigError";
   }
 }
@@ -39,10 +37,8 @@ export function parseColumnPath(s: string): {
   column: string;
 } {
   const parts = s.split(".");
-  if (parts.length === 2)
-    return { schema: "public", table: parts[0]!, column: parts[1]! };
-  if (parts.length === 3)
-    return { schema: parts[0]!, table: parts[1]!, column: parts[2]! };
+  if (parts.length === 2) return { schema: "public", table: parts[0]!, column: parts[1]! };
+  if (parts.length === 3) return { schema: parts[0]!, table: parts[1]!, column: parts[2]! };
   throw new Error(
     `invalid table.column reference "${s}": expected "table.column" or "schema.table.column"`,
   );
@@ -108,10 +104,7 @@ const relationInput = z
  * foreign key, a polymorphic association, or an ignore of a real catalog
  * FK — naming the incomplete or ambiguous combination of fields otherwise.
  */
-function classifyRelation(
-  r: z.output<typeof relationInput>,
-  ctx: z.RefinementCtx,
-): Relation {
+function classifyRelation(r: z.output<typeof relationInput>, ctx: z.RefinementCtx): Relation {
   const fail = (message: string) => {
     ctx.addIssue({ code: "custom", message });
     return z.NEVER;
@@ -124,21 +117,18 @@ function classifyRelation(
         "relation must be exactly one of a foreign key, a polymorphic association, or an ignore, but 'ignore' is set alongside other fields",
       );
     }
-    if (r.ignore.columns.length !== 1)
-      return fail("ignore must name a single column");
+    if (r.ignore.columns.length !== 1) return fail("ignore must name a single column");
     return { kind: "ignore", column: r.ignore };
   }
 
   if (hasPoly) {
     if (!r.from) return fail("polymorphic relation missing 'from'");
     const on = formatRef(r.from);
-    if (!r.polymorphicType)
-      return fail(`polymorphic relation on ${on} missing 'polymorphicType'`);
+    if (!r.polymorphicType) return fail(`polymorphic relation on ${on} missing 'polymorphicType'`);
     if (!r.targets || Object.keys(r.targets).length === 0) {
       return fail(`polymorphic relation on ${on} missing 'targets'`);
     }
-    if (r.to)
-      return fail(`polymorphic relation on ${on} must not also set 'to'`);
+    if (r.to) return fail(`polymorphic relation on ${on} must not also set 'to'`);
     if (
       tableKey(r.polymorphicType) !== tableKey(r.from) ||
       r.polymorphicType.columns.length !== 1
@@ -149,9 +139,7 @@ function classifyRelation(
     }
     for (const [value, target] of Object.entries(r.targets)) {
       if (target.columns.length !== r.from.columns.length) {
-        return fail(
-          `targets["${value}"]: column count must match from (${r.from.columns.length})`,
-        );
+        return fail(`targets["${value}"]: column count must match from (${r.from.columns.length})`);
       }
     }
     return {
@@ -162,14 +150,10 @@ function classifyRelation(
     };
   }
 
-  if (r.from && !r.to)
-    return fail(`relation from=${formatRef(r.from)} missing 'to'`);
-  if (!r.from && r.to)
-    return fail(`relation to=${formatRef(r.to)} missing 'from'`);
+  if (r.from && !r.to) return fail(`relation from=${formatRef(r.from)} missing 'to'`);
+  if (!r.from && r.to) return fail(`relation to=${formatRef(r.to)} missing 'from'`);
   if (!r.from || !r.to) {
-    return fail(
-      "relation has none of 'from'/'to', 'polymorphicType', or 'ignore' set",
-    );
+    return fail("relation has none of 'from'/'to', 'polymorphicType', or 'ignore' set");
   }
   if (r.from.columns.length !== r.to.columns.length) {
     return fail(
@@ -224,9 +208,7 @@ const projectConfigSchema = z
     relations: z.array(relationInput.transform(classifyRelation)).default([]),
     /** FK columns to stop following (and defer on load) when they form a cycle. */
     dependencyBreaks: z
-      .array(
-        z.object({ table: qualifiedTable, column: z.string().min(1) }).strict(),
-      )
+      .array(z.object({ table: qualifiedTable, column: z.string().min(1) }).strict())
       .default([]),
     /**
      * "downstream" (default): rows pulled in only as required parents aren't

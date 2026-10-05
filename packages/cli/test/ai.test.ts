@@ -1,6 +1,6 @@
 import type { Schema } from "@bhuneshvar-k/tributary-core";
 import { describe, expect, test } from "vitest";
-import { buildSystemPrompt, parseAiCommand, toCliArgs } from "../src/ai.js";
+import { buildSystemPrompt, createModel, parseAiCommand, toCliArgs } from "../src/ai.js";
 
 const schema: Schema = {
   tables: [
@@ -12,6 +12,7 @@ const schema: Schema = {
         {
           name: "id",
           type: "integer",
+          udtSchema: "pg_catalog",
           udtName: "int4",
           sqlType: "integer",
           nullable: false,
@@ -19,6 +20,7 @@ const schema: Schema = {
         {
           name: "email",
           type: "text",
+          udtSchema: "pg_catalog",
           udtName: "text",
           sqlType: "text",
           nullable: true,
@@ -26,6 +28,7 @@ const schema: Schema = {
         {
           name: "company_id",
           type: "integer",
+          udtSchema: "pg_catalog",
           udtName: "int4",
           sqlType: "integer",
           nullable: true,
@@ -90,9 +93,7 @@ describe("parseAiCommand", () => {
   });
 
   test("an unknown command is rejected", () => {
-    expect(() =>
-      parseAiCommand({ command: "drop", explanation: "", warnings: [] }),
-    ).toThrow();
+    expect(() => parseAiCommand({ command: "drop", explanation: "", warnings: [] })).toThrow();
   });
 });
 
@@ -129,12 +130,24 @@ describe("toCliArgs", () => {
       explanation: "",
       warnings: [],
     });
-    expect(toCliArgs(command)).toEqual([
-      "plan",
-      "--seed-table",
-      "users",
-      "--where",
-      "id = 1",
-    ]);
+    expect(toCliArgs(command)).toEqual(["plan", "--seed-table", "users", "--where", "id = 1"]);
+  });
+});
+
+describe("createModel", () => {
+  test("opencode needs an explicit base URL instead of guessing a port", () => {
+    expect(() => createModel({ provider: "opencode", model: "m" })).toThrow(
+      /tributary config set ai\.baseUrl/,
+    );
+  });
+
+  test("a provider with no default model asks for one", () => {
+    expect(() => createModel({ provider: "openrouter", apiKey: "k" })).toThrow(
+      /tributary config set ai\.model/,
+    );
+  });
+
+  test("defaults to Anthropic's model", () => {
+    expect(createModel({ apiKey: "k" })).toMatchObject({ modelId: "claude-sonnet-5-5" });
   });
 });

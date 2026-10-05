@@ -42,17 +42,11 @@ describe("buildGraph", () => {
         toColumns: ["id"],
       },
     ]);
-    expect(g.incoming("public.users").map((e) => e.from)).toEqual([
-      "public.orders",
-    ]);
+    expect(g.incoming("public.users").map((e) => e.from)).toEqual(["public.orders"]);
   });
 
   test("a polymorphic relation is indexed under each of its targets", () => {
-    const comments = table("public.comments", [
-      "id",
-      "subject_id",
-      "subject_type",
-    ]);
+    const comments = table("public.comments", ["id", "subject_id", "subject_type"]);
     const posts = table("public.posts", ["id"]);
     const g = buildGraph(
       schema(comments, posts, users, companies),
@@ -78,12 +72,8 @@ describe("buildGraph", () => {
         User: { to: "public.users", toColumns: ["id"] },
       },
     });
-    expect(g.polymorphicIncoming("public.posts")).toEqual([
-      { edge, typeValue: "Post" },
-    ]);
-    expect(g.polymorphicIncoming("public.users")).toEqual([
-      { edge, typeValue: "User" },
-    ]);
+    expect(g.polymorphicIncoming("public.posts")).toEqual([{ edge, typeValue: "Post" }]);
+    expect(g.polymorphicIncoming("public.users")).toEqual([{ edge, typeValue: "User" }]);
     expect(g.incoming("public.posts")).toEqual([]);
   });
 
@@ -94,9 +84,7 @@ describe("buildGraph", () => {
     );
     expect(g.outgoing("public.users")).toEqual([]);
     expect(g.incoming("public.companies")).toEqual([]);
-    expect(g.ignored.map((e) => e.constraintName)).toEqual([
-      "users_company_fk",
-    ]);
+    expect(g.ignored.map((e) => e.constraintName)).toEqual(["users_company_fk"]);
   });
 
   test("an ignore matching no catalog foreign key is an error", () => {

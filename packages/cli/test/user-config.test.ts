@@ -23,9 +23,7 @@ describe("user config", () => {
     expect(JSON.parse(readFileSync(store.path, "utf8"))).toEqual({
       connections: { local: { url: "postgres://localhost/dev" } },
     });
-    expect(openUserConfig({ dir }).connectionUrl("local")).toBe(
-      "postgres://localhost/dev",
-    );
+    expect(openUserConfig({ dir }).connectionUrl("local")).toBe("postgres://localhost/dev");
   });
 
   test("the allowlist takes a comma-separated list", () => {
@@ -43,9 +41,7 @@ describe("user config", () => {
   test("ai.provider must be a supported provider", () => {
     store.set("ai.provider", "anthropic");
     expect(store.get("ai.provider")).toBe("anthropic");
-    expect(() => store.set("ai.provider", "skynet")).toThrow(
-      /ai\.provider must be one of/,
-    );
+    expect(() => store.set("ai.provider", "skynet")).toThrow(/ai\.provider must be one of/);
   });
 
   test("unset removes a key", () => {

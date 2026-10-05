@@ -1,18 +1,6 @@
 import type { DependencyBreak, Seed, TableColumn, Traversal } from "./config.js";
-import {
-  ident,
-  type Queryable,
-  qualified,
-  querySingleStatement,
-  type Row,
-} from "./db.js";
-import type {
-  Edge,
-  FixedEdge,
-  Graph,
-  NodeId,
-  PolymorphicReverse,
-} from "./graph.js";
+import { ident, type Queryable, qualified, querySingleStatement, type Row } from "./db.js";
+import type { Edge, FixedEdge, Graph, NodeId, PolymorphicReverse } from "./graph.js";
 
 /**
  * The subset: every row, grouped by table and keyed by primary key, that
@@ -83,13 +71,11 @@ export async function computeClosure(
   seeds: Seed[],
   options: ClosureOptions = {},
 ): Promise<Closure> {
-  if (seeds.length === 0)
-    throw new Error("no seeds: the subset needs at least one seed");
+  if (seeds.length === 0) throw new Error("no seeds: the subset needs at least one seed");
   const walker = new Walker(db, graph, options);
   const queue: Found[] = [];
   for (const seed of seeds) {
-    if (!graph.table(seed.table))
-      throw new Error(`no such table "${seed.table}" in source schema`);
+    if (!graph.table(seed.table)) throw new Error(`no such table "${seed.table}" in source schema`);
     requirePrimaryKey(graph, seed.table);
     const seedRows = await querySingleStatement(
       db,
@@ -113,9 +99,7 @@ export async function computeClosure(
 function requirePrimaryKey(graph: Graph, table: NodeId): string[] {
   const pk = graph.table(table)?.primaryKey ?? [];
   if (pk.length === 0) {
-    throw new Error(
-      `table "${table}" has no primary key; tributary needs one to identify rows`,
-    );
+    throw new Error(`table "${table}" has no primary key; tributary needs one to identify rows`);
   }
   return pk;
 }
@@ -149,10 +133,7 @@ class Walker {
     const key = rowKey(requirePrimaryKey(this.graph, found.table), found.row);
     const id = `${found.table}\0${key}`;
     const previous = this.reach.get(id);
-    if (
-      previous === undefined ||
-      (previous === "parent" && found.reach === "downstream")
-    ) {
+    if (previous === undefined || (previous === "parent" && found.reach === "downstream")) {
       this.reach.set(id, found.reach);
       let rows = this.closure.rows.get(found.table);
       if (!rows) {
@@ -172,14 +153,12 @@ class Walker {
       const values = valuesOf(row, e.fromColumns);
       if (!values) continue; // nullable reference not set: no parent
       if (e.kind === "polymorphic") {
-        for (const r of await this.followPolymorphic(row, e, values))
-          next.push(r);
+        for (const r of await this.followPolymorphic(row, e, values)) next.push(r);
         continue;
       }
       if (this.graph.inCycle(e) && this.breakEdge(e)) continue;
       const rows = await this.select(e.to, e.toColumns, values);
-      for (const r of rows)
-        next.push({ table: e.to, row: r, reach: this.parentReach });
+      for (const r of rows) next.push({ table: e.to, row: r, reach: this.parentReach });
     }
 
     if (this.options.traversal === "full" || reach === "downstream") {
@@ -217,18 +196,11 @@ class Walker {
     return rows.map((r): Found => ({ table: target.to, row: r, reach: this.parentReach }));
   }
 
-  private async followPolymorphicReverse(
-    row: Row,
-    { edge, typeValue }: PolymorphicReverse,
-  ) {
+  private async followPolymorphicReverse(row: Row, { edge, typeValue }: PolymorphicReverse) {
     const target = edge.targets[typeValue]!;
     const values = valuesOf(row, target.toColumns);
     if (!values) return [];
-    return this.select(
-      edge.from,
-      [...edge.fromColumns, edge.typeColumn],
-      [...values, typeValue],
-    );
+    return this.select(edge.from, [...edge.fromColumns, edge.typeColumn], [...values, typeValue]);
   }
 
   /**
@@ -238,8 +210,7 @@ class Walker {
    * hop per row.
    */
   private breakEdge(e: FixedEdge): boolean {
-    if (e.fromColumns.some((c) => this.broken.has(columnId(e.from, c))))
-      return true;
+    if (e.fromColumns.some((c) => this.broken.has(columnId(e.from, c)))) return true;
 
     const breaks = this.options.dependencyBreaks ?? [];
     const configured = e.fromColumns.find((c) =>
@@ -268,18 +239,9 @@ class Walker {
     return true;
   }
 
-  private async select(
-    table: NodeId,
-    columns: string[],
-    values: string[],
-  ): Promise<Row[]> {
-    const where = columns
-      .map((c, i) => `${ident(c)} = $${i + 1}`)
-      .join(" AND ");
-    const result = await this.db.query(
-      `SELECT * FROM ${qualified(table)} WHERE ${where}`,
-      values,
-    );
+  private async select(table: NodeId, columns: string[], values: string[]): Promise<Row[]> {
+    const where = columns.map((c, i) => `${ident(c)} = $${i + 1}`).join(" AND ");
+    const result = await this.db.query(`SELECT * FROM ${qualified(table)} WHERE ${where}`, values);
     return result.rows;
   }
 }

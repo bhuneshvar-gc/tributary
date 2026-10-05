@@ -27,13 +27,9 @@ function matches(host: string, pattern: string): boolean {
  * wildcard matching any subdomain depth. An empty allowlist denies every
  * target, so writes need an explicit opt-in per environment.
  */
-export function checkTargetAllowed(
-  url: string,
-  allowlist: readonly string[],
-): void {
+export function checkTargetAllowed(url: string, allowlist: readonly string[]): void {
   const host = connectionHost(url).toLowerCase();
-  if (!allowlist.some((p) => matches(host, p)))
-    throw new TargetNotAllowedError(host);
+  if (!allowlist.some((p) => matches(host, p))) throw new TargetNotAllowedError(host);
 }
 
 export interface DatabaseIdentity {
@@ -57,9 +53,7 @@ export async function databaseIdentity(db: Queryable): Promise<DatabaseIdentity>
   const r = rows[0]!;
   let cluster: string | null = null;
   if (r.can_read_cluster === "t") {
-    const sid = await db.query(
-      "select system_identifier::text as sid from pg_control_system()",
-    );
+    const sid = await db.query("select system_identifier::text as sid from pg_control_system()");
     cluster = `${sid.rows[0]!.sid}/${r.db}`;
   }
   return { instance: `${r.started}/${r.oid}/${r.db}`, cluster };

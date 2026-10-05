@@ -1,13 +1,8 @@
 import Conf from "conf";
 
-export const AI_PROVIDERS = [
-  "anthropic",
-  "openai",
-  "google",
-  "openrouter",
-  "opencode",
-] as const;
-export type AiProvider = (typeof AI_PROVIDERS)[number];
+import { AI_PROVIDERS, type AiProvider } from "./providers.js";
+
+export type { AiProvider };
 
 /**
  * Machine-local settings, kept out of the project: named connections,
@@ -51,9 +46,7 @@ const KEYS: KeySpec[] = [
     example: "ai.provider",
     parse: (s) => {
       if (!(AI_PROVIDERS as readonly string[]).includes(s)) {
-        throw new Error(
-          `ai.provider must be one of: ${AI_PROVIDERS.join(", ")}`,
-        );
+        throw new Error(`ai.provider must be one of: ${AI_PROVIDERS.join(", ")}`);
       }
       return s;
     },
@@ -91,9 +84,7 @@ export interface UserConfigStore {
  * Opens the user config. `dir` overrides the OS config directory (also
  * settable with TRIBUTARY_CONFIG_DIR, e.g. for CI).
  */
-export function openUserConfig(
-  options: { dir?: string } = {},
-): UserConfigStore {
+export function openUserConfig(options: { dir?: string } = {}): UserConfigStore {
   const dir = options.dir ?? process.env.TRIBUTARY_CONFIG_DIR;
   const conf = new Conf<UserConfig>({
     projectName: "tributary",

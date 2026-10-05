@@ -9,25 +9,18 @@ describe("checkTargetAllowed", () => {
   });
 
   test("an exact host is allowed, case-insensitively", () => {
-    expect(() =>
-      checkTargetAllowed("postgres://u@LocalHost:5433/db", ["localhost"]),
-    ).not.toThrow();
+    expect(() => checkTargetAllowed("postgres://u@LocalHost:5433/db", ["localhost"])).not.toThrow();
   });
 
   test("a wildcard matches any subdomain depth", () => {
     expect(() =>
-      checkTargetAllowed("postgres://db.eu.staging.internal/x", [
-        "*.staging.internal",
-      ]),
+      checkTargetAllowed("postgres://db.eu.staging.internal/x", ["*.staging.internal"]),
     ).not.toThrow();
   });
 
   test("a host outside the allowlist is denied, naming the host", () => {
     expect(() =>
-      checkTargetAllowed("postgres://u:secret@prod-db.example.com/app", [
-        "localhost",
-        "*.staging",
-      ]),
+      checkTargetAllowed("postgres://u:secret@prod-db.example.com/app", ["localhost", "*.staging"]),
     ).toThrow(/"prod-db\.example\.com" is not in the target allowlist/);
   });
 
@@ -40,16 +33,14 @@ describe("checkTargetAllowed", () => {
   });
 
   test("a wildcard doesn't match a suffix without the dot", () => {
-    expect(() =>
-      checkTargetAllowed("postgres://evilstaging/x", ["*.staging"]),
-    ).toThrow(TargetNotAllowedError);
+    expect(() => checkTargetAllowed("postgres://evilstaging/x", ["*.staging"])).toThrow(
+      TargetNotAllowedError,
+    );
   });
 
   test("a unix socket directory matches by path", () => {
     expect(() =>
-      checkTargetAllowed("postgres:///app?host=/var/run/postgresql", [
-        "/var/run/postgresql",
-      ]),
+      checkTargetAllowed("postgres:///app?host=/var/run/postgresql", ["/var/run/postgresql"]),
     ).not.toThrow();
   });
 });

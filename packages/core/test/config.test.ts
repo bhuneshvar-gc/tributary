@@ -44,21 +44,21 @@ describe("parseProjectConfig", () => {
   });
 
   test("rejects a malformed reference", () => {
-    expect(() =>
-      parseProjectConfig({ relations: [{ from: "nodot", to: "users.id" }] }),
-    ).toThrow(/relations\.0\.from: invalid table\.column reference "nodot"/);
+    expect(() => parseProjectConfig({ relations: [{ from: "nodot", to: "users.id" }] })).toThrow(
+      /relations\.0\.from: invalid table\.column reference "nodot"/,
+    );
   });
 
   test("rejects composite key length mismatch", () => {
-    expect(() =>
-      parseProjectConfig({ relations: [{ from: ["a.x", "a.y"], to: "b.id" }] }),
-    ).toThrow(/relations\.0: .*composite key length mismatch \(2 vs 1\)/);
+    expect(() => parseProjectConfig({ relations: [{ from: ["a.x", "a.y"], to: "b.id" }] })).toThrow(
+      /relations\.0: .*composite key length mismatch \(2 vs 1\)/,
+    );
   });
 
   test("rejects a relation that references itself", () => {
-    expect(() =>
-      parseProjectConfig({ relations: [{ from: "a.id", to: "a.id" }] }),
-    ).toThrow(/relations\.0: .*can't reference itself/);
+    expect(() => parseProjectConfig({ relations: [{ from: "a.id", to: "a.id" }] })).toThrow(
+      /relations\.0: .*can't reference itself/,
+    );
   });
 
   test("a polymorphic relation resolves discriminator and targets", () => {

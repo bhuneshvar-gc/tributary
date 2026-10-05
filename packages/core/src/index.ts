@@ -8,6 +8,6 @@ export * from "./guards.js";
 export * from "./inspect.js";
 export * from "./load.js";
 export * from "./order.js";
+export * from "./plan.js";
 export * from "./state.js";
 export * from "./sync.js";
-export * from "./plan.js";

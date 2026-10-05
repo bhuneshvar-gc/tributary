@@ -29,7 +29,11 @@ export interface Subset {
  * Inspects the source and computes the subset. Call inside readOnly() so
  * every query sees one snapshot and nothing can write to the source.
  */
-export async function computeSubset(source: Queryable, seeds: Seed[], config: ProjectConfig): Promise<Subset> {
+export async function computeSubset(
+  source: Queryable,
+  seeds: Seed[],
+  config: ProjectConfig,
+): Promise<Subset> {
   const schema = await inspect(source);
   const graph = buildGraph(schema, config);
   const closure = await computeClosure(source, graph, seeds, config);

@@ -42,6 +42,10 @@ export async function connect(url: string): Promise<pg.Client> {
     connectionString: url,
     types: rawText as pg.CustomTypesConfig,
   });
+  // pg emits connection-level failures (a dropped connection, a protocol
+  // error) as 'error' events, which crash the process when unhandled. The
+  // in-flight query rejects as well, so that's where they're reported.
+  client.on("error", () => {});
   await client.connect();
   return client;
 }

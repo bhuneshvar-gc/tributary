@@ -46,15 +46,8 @@ test("copies the subset into an empty target, creating its tables", async () => 
     ["public.parent_table", 1],
     ["public.child_table", 2],
   ]);
-  expect(result.schema.tablesCreated).toEqual([
-    "public.child_table",
-    "public.parent_table",
-  ]);
-  expect(
-    await db.target.query(
-      "select id, parent_id, name from child_table order by id",
-    ),
-  ).toEqual([
+  expect(result.schema.tablesCreated).toEqual(["public.child_table", "public.parent_table"]);
+  expect(await db.target.query("select id, parent_id, name from child_table order by id")).toEqual([
     { id: 10, parent_id: 1, name: "c10" },
     { id: 11, parent_id: 1, name: "c11" },
   ]);
@@ -72,12 +65,10 @@ test("re-running updates changed rows in place instead of failing or duplicating
 
   const result = await run("leaf_table", "id = 1");
 
-  expect(
-    result.tables.map((t) => [t.table, t.rowsUpserted, t.resumed]),
-  ).toEqual([["public.leaf_table", 1, false]]);
-  expect(await db.target.query("select * from leaf_table")).toEqual([
-    { id: 1, name: "after" },
+  expect(result.tables.map((t) => [t.table, t.rowsUpserted, t.resumed])).toEqual([
+    ["public.leaf_table", 1, false],
   ]);
+  expect(await db.target.query("select * from leaf_table")).toEqual([{ id: 1, name: "after" }]);
 });
 
 test("re-running a key-only table counts its rows as upserted", async () => {
@@ -97,18 +88,14 @@ test("a composite foreign key loads with its columns paired", async () => {
 
   await run("composite_child_table", "id = 1");
 
-  expect(
-    await db.target.query(
-      "select tenant_id, id, name from composite_parent_table",
-    ),
-  ).toEqual([{ tenant_id: 2, id: 5, name: "tenant2-5" }]);
+  expect(await db.target.query("select tenant_id, id, name from composite_parent_table")).toEqual([
+    { tenant_id: 2, id: 5, name: "tenant2-5" },
+  ]);
 });
 
 describe("self-references", () => {
   test("are loaded NULL first, then backfilled", async () => {
-    await db.source.exec(
-      `insert into self_ref_table values (1, null), (2, 1), (3, 2);`,
-    );
+    await db.source.exec(`insert into self_ref_table values (1, null), (2, 1), (3, 2);`);
 
     const result = await run("self_ref_table", "id = 1");
 
@@ -121,11 +108,7 @@ describe("self-references", () => {
         resumed: false,
       },
     ]);
-    expect(
-      await db.target.query(
-        "select id, next_id from self_ref_table order by id",
-      ),
-    ).toEqual([
+    expect(await db.target.query("select id, next_id from self_ref_table order by id")).toEqual([
       { id: 1, next_id: null },
       { id: 2, next_id: 1 },
       { id: 3, next_id: 2 },
@@ -133,9 +116,7 @@ describe("self-references", () => {
   });
 
   test("stay NULL where the referenced row is outside the subset", async () => {
-    await db.source.exec(
-      `insert into self_ref_table values (1, null), (2, 1);`,
-    );
+    await db.source.exec(`insert into self_ref_table values (1, null), (2, 1);`);
 
     const result = await run("self_ref_table", "id = 2");
 
@@ -144,9 +125,9 @@ describe("self-references", () => {
       rowsBackfilled: 0,
       rowsLeftNull: 1,
     });
-    expect(
-      await db.target.query("select id, next_id from self_ref_table"),
-    ).toEqual([{ id: 2, next_id: null }]);
+    expect(await db.target.query("select id, next_id from self_ref_table")).toEqual([
+      { id: 2, next_id: null },
+    ]);
   });
 
   test("that are NOT NULL fail preflight naming the column", async () => {
@@ -155,9 +136,9 @@ describe("self-references", () => {
     await expect(run("self_ref_strict_table", "id = 1")).rejects.toThrow(
       /public\.self_ref_strict_table\.next_id .*is NOT NULL/,
     );
-    expect(
-      await db.target.query("select to_regclass('self_ref_strict_table') as t"),
-    ).toEqual([{ t: null }]);
+    expect(await db.target.query("select to_regclass('self_ref_strict_table') as t")).toEqual([
+      { t: null },
+    ]);
   });
 });
 
@@ -174,13 +155,8 @@ test("a multi-table cycle loads with a dependency break, backfilling the broken 
     config: { dependencyBreaks: [{ table: "cycle_a", column: "b_id" }] },
   });
 
-  expect(result.tables.map((t) => t.table)).toEqual([
-    "public.cycle_a",
-    "public.cycle_b",
-  ]);
-  expect(await db.target.query("select id, b_id from cycle_a")).toEqual([
-    { id: 1, b_id: 1 },
-  ]);
+  expect(result.tables.map((t) => t.table)).toEqual(["public.cycle_a", "public.cycle_b"]);
+  expect(await db.target.query("select id, b_id from cycle_a")).toEqual([{ id: 1, b_id: 1 }]);
 });
 
 describe("custom types", () => {
@@ -191,9 +167,7 @@ describe("custom types", () => {
 
     expect(result.schema.typesCreated).toEqual(["public.enum_status"]);
     expect(
-      await db.target.query(
-        "select unnest(enum_range(null::enum_status))::text as label",
-      ),
+      await db.target.query("select unnest(enum_range(null::enum_status))::text as label"),
     ).toEqual([{ label: "active" }, { label: "inactive" }]);
   });
 
@@ -215,14 +189,19 @@ describe("custom types", () => {
 
     const result = await run("invoice", "id = 1", { schema: "billing" });
 
-    expect(result.schema.typesCreated.sort()).toEqual(["billing.invoice_status", "public.invoice_status"]);
+    expect(result.schema.typesCreated.sort()).toEqual([
+      "billing.invoice_status",
+      "public.invoice_status",
+    ]);
     const labels = (type: string) =>
       db.target.query(`select unnest(enum_range(null::${type}))::text as label`);
     expect(await labels("billing.invoice_status")).toEqual([{ label: "draft" }, { label: "paid" }]);
     expect(await labels("public.invoice_status")).toEqual([{ label: "open" }, { label: "closed" }]);
-    expect(await db.target.query("select status::text, legacy::text, history::text from billing.invoice")).toEqual([
-      { status: "paid", legacy: "closed", history: "{draft,paid}" },
-    ]);
+    expect(
+      await db.target.query(
+        "select status::text, legacy::text, history::text from billing.invoice",
+      ),
+    ).toEqual([{ status: "paid", legacy: "closed", history: "{draft,paid}" }]);
   });
 
   test("a missing domain is a named error", async () => {
@@ -259,18 +238,14 @@ describe("resume", () => {
       create table child_table (id int primary key, parent_id int not null references parent_table, name text not null check (name <> 'bad'));`);
 
     await expect(run("parent_table", "id = 1")).rejects.toThrow(/child_table/);
-    await db.target.exec(
-      `alter table child_table drop constraint child_table_name_check;`,
-    );
+    await db.target.exec(`alter table child_table drop constraint child_table_name_check;`);
     const result = await run("parent_table", "id = 1");
 
     expect(result.tables.map((t) => [t.table, t.resumed])).toEqual([
       ["public.parent_table", true],
       ["public.child_table", false],
     ]);
-    expect(
-      await db.target.query("select count(*)::int as n from child_table"),
-    ).toEqual([{ n: 1 }]);
+    expect(await db.target.query("select count(*)::int as n from child_table")).toEqual([{ n: 1 }]);
   });
 
   test("a resume reloads an already-loaded table whose source rows changed since", async () => {
@@ -282,27 +257,19 @@ describe("resume", () => {
       create table child_table (id int primary key, parent_id int not null references parent_table, name text not null check (name <> 'bad'));`);
 
     await expect(run("parent_table", "id = 1")).rejects.toThrow(/child_table/);
-    await db.source.exec(
-      `update parent_table set name = 'renamed' where id = 1;`,
-    );
-    await db.target.exec(
-      `alter table child_table drop constraint child_table_name_check;`,
-    );
+    await db.source.exec(`update parent_table set name = 'renamed' where id = 1;`);
+    await db.target.exec(`alter table child_table drop constraint child_table_name_check;`);
     const result = await run("parent_table", "id = 1");
 
     expect(result.tables.map((t) => [t.table, t.resumed])).toEqual([
       ["public.parent_table", false],
       ["public.child_table", false],
     ]);
-    expect(await db.target.query("select name from parent_table")).toEqual([
-      { name: "renamed" },
-    ]);
+    expect(await db.target.query("select name from parent_table")).toEqual([{ name: "renamed" }]);
   });
 
   test("fresh deletes the subset's rows and starts over instead of resuming", async () => {
-    await db.source.exec(
-      `insert into leaf_table values (1, 'one'), (2, 'two');`,
-    );
+    await db.source.exec(`insert into leaf_table values (1, 'one'), (2, 'two');`);
     await db.target.exec(`
       create table leaf_table (id int primary key, name text not null, note text);
       insert into leaf_table values (1, 'stale', 'target-only'), (3, 'three', 'outside the subset');`);
@@ -310,11 +277,7 @@ describe("resume", () => {
     const result = await run("leaf_table", "id = 1", { fresh: true });
 
     expect(result.tables[0]).toMatchObject({ rowsUpserted: 1, resumed: false });
-    expect(
-      await db.target.query(
-        "select id, name, note from leaf_table order by id",
-      ),
-    ).toEqual([
+    expect(await db.target.query("select id, name, note from leaf_table order by id")).toEqual([
       { id: 1, name: "one", note: null },
       { id: 3, name: "three", note: "outside the subset" },
     ]);
@@ -325,29 +288,25 @@ test("an existing target table missing a source column is rejected", async () =>
   await db.source.exec(`insert into leaf_table values (1, 'one');`);
   await db.target.exec(`create table leaf_table (id int primary key);`);
 
-  await expect(run("leaf_table", "id = 1")).rejects.toThrow(
-    /missing column "name"/,
-  );
+  await expect(run("leaf_table", "id = 1")).rejects.toThrow(/missing column "name"/);
 });
 
 test("with schema creation off, a missing target table is an error", async () => {
   await db.source.exec(`insert into leaf_table values (1, 'one');`);
 
-  await expect(
-    run("leaf_table", "id = 1", { createSchema: false }),
-  ).rejects.toThrow(/missing 1 table\(s\) .*: public\.leaf_table/);
+  await expect(run("leaf_table", "id = 1", { createSchema: false })).rejects.toThrow(
+    /missing 1 table\(s\) .*: public\.leaf_table/,
+  );
 });
 
 describe("safety guards", () => {
   test("a target outside the allowlist is refused before anything is touched", async () => {
     await db.source.exec(`insert into leaf_table values (1, 'one');`);
 
-    await expect(
-      run("leaf_table", "id = 1", { allowlist: [] }),
-    ).rejects.toThrow(TargetNotAllowedError);
-    expect(
-      await db.target.query("select to_regclass('leaf_table') as t"),
-    ).toEqual([{ t: null }]);
+    await expect(run("leaf_table", "id = 1", { allowlist: [] })).rejects.toThrow(
+      TargetNotAllowedError,
+    );
+    expect(await db.target.query("select to_regclass('leaf_table') as t")).toEqual([{ t: null }]);
   });
 
   test("syncing a database into itself is refused", async () => {
@@ -368,12 +327,8 @@ describe("safety guards", () => {
       insert into leaf_table values (1, 'one');
       create function sneaky() returns boolean language sql as $$ delete from leaf_table; select true $$;`);
 
-    await expect(run("leaf_table", "sneaky()")).rejects.toThrow(
-      /read-only transaction/,
-    );
-    expect(
-      await db.source.query("select count(*)::int as n from leaf_table"),
-    ).toEqual([{ n: 1 }]);
+    await expect(run("leaf_table", "sneaky()")).rejects.toThrow(/read-only transaction/);
+    expect(await db.source.query("select count(*)::int as n from leaf_table")).toEqual([{ n: 1 }]);
   });
 
   test("the seed predicate can't smuggle in extra statements to end the read-only transaction", async () => {
@@ -382,9 +337,7 @@ describe("safety guards", () => {
     await expect(
       run("leaf_table", "true); COMMIT; DELETE FROM leaf_table; SELECT (1"),
     ).rejects.toThrow(/multiple commands/);
-    expect(
-      await db.source.query("select count(*)::int as n from leaf_table"),
-    ).toEqual([{ n: 1 }]);
+    expect(await db.source.query("select count(*)::int as n from leaf_table")).toEqual([{ n: 1 }]);
   });
 });
 

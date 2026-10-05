@@ -26,7 +26,14 @@ test("inspect reports base tables with columns, keys and composite foreign keys"
       int("id"),
       int("parent_id"),
       int("tenant_id"),
-      { name: "sku", type: "text", udtSchema: "pg_catalog", udtName: "text", sqlType: "text", nullable: false },
+      {
+        name: "sku",
+        type: "text",
+        udtSchema: "pg_catalog",
+        udtName: "text",
+        sqlType: "text",
+        nullable: false,
+      },
     ],
     foreignKeys: [
       {
@@ -62,9 +69,20 @@ test("inspect reports schema-qualified enums, domains and exact types", async ()
   });
   expect(columns("invoice")).toMatchObject([
     { name: "id" },
-    { name: "status", udtSchema: "billing", udtName: "invoice_status", sqlType: "billing.invoice_status" },
+    {
+      name: "status",
+      udtSchema: "billing",
+      udtName: "invoice_status",
+      sqlType: "billing.invoice_status",
+    },
     { name: "legacy", udtSchema: "public", udtName: "invoice_status", sqlType: "invoice_status" },
-    { name: "history", type: "ARRAY", udtSchema: "billing", udtName: "_invoice_status", sqlType: "billing.invoice_status[]" },
+    {
+      name: "history",
+      type: "ARRAY",
+      udtSchema: "billing",
+      udtName: "_invoice_status",
+      sqlType: "billing.invoice_status[]",
+    },
   ]);
   expect(columns("domain_table")[1]).toMatchObject({
     type: "USER-DEFINED",

@@ -5,7 +5,14 @@ import { connect, type Queryable, readOnly, transaction } from "./db.js";
 import { ensureSchema, type SchemaReport } from "./ddl.js";
 import type { NodeId } from "./graph.js";
 import { assertDifferentDatabases, checkTargetAllowed, databaseIdentity } from "./guards.js";
-import { backfill, checkDeferrable, deferredColumns, deleteRows, explainLoadError, upsertRows } from "./load.js";
+import {
+  backfill,
+  checkDeferrable,
+  deferredColumns,
+  deleteRows,
+  explainLoadError,
+  upsertRows,
+} from "./load.js";
 import { computeSubset, type PlanOptions, type Subset } from "./plan.js";
 import {
   completedTables,
@@ -92,7 +99,8 @@ async function load(
   try {
     if (options.fresh) {
       await transaction(target, async () => {
-        for (const id of [...order].reverse()) await deleteRows(target, tables.get(id)!, rowsOf(id));
+        for (const id of [...order].reverse())
+          await deleteRows(target, tables.get(id)!, rowsOf(id));
       });
     }
 
@@ -111,7 +119,12 @@ async function load(
       if (result.resumed) continue;
       await transaction(target, async () => {
         try {
-          result.rowsUpserted = await upsertRows(target, tables.get(id)!, rowsOf(id), deferredByTable.get(id));
+          result.rowsUpserted = await upsertRows(
+            target,
+            tables.get(id)!,
+            rowsOf(id),
+            deferredByTable.get(id),
+          );
         } catch (e) {
           throw explainLoadError(e, id);
         }
@@ -123,7 +136,12 @@ async function load(
       for (const result of results) {
         const fks = deferred.get(result.table);
         if (!fks) continue;
-        const { backfilled, leftNull } = await backfill(target, tables.get(result.table)!, fks, closure);
+        const { backfilled, leftNull } = await backfill(
+          target,
+          tables.get(result.table)!,
+          fks,
+          closure,
+        );
         result.rowsBackfilled = backfilled;
         result.rowsLeftNull = leftNull;
       }

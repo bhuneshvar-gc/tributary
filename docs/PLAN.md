@@ -178,6 +178,30 @@ Decisions made while building, superseding the tables above where they differ:
 - **Failed runs resume.** An unfinished run (interrupted _or_ failed)
   resumes from its completed tables; only a completed run or `--fresh`
   starts over.
+- **Multiple seeds.** `seeds: [...]` as the original plan sketched; one
+  closure covers all of them. `--seed-table`/`--where` replace the
+  configured seeds with a single one.
+- **Seed predicates are one statement.** They're interpolated (admin-tool
+  trust model) but sent through the extended protocol, which Postgres
+  limits to a single statement, so a predicate can't `COMMIT` its way out
+  of the read-only transaction. Every source query, including `inspect`
+  and the AI command's schema read, runs read-only.
+- **Same-database guard.** Compares server start time + database oid +
+  name (works for any role, survives poolers) and, where the role may
+  read `pg_control_system()`, the cluster system identifier (catches a
+  replica of the target).
+- **Resume is fingerprinted.** Each table's checkpoint stores a hash of
+  the rows it loaded; a resume only skips a table whose rows are
+  unchanged, so source edits between attempts are never left out.
+- **Enums are schema-qualified** (`schema.type`), created in their own
+  schema, including enums used only as array element types.
+- **Accepted additions beyond the plan:** `config unset` and `config path`,
+  `*.suffix` allowlist wildcards, `TRIBUTARY_CONFIG_DIR`,
+  `--no-create-schema`, `ai --dry-run`, and `ai.baseUrl`. The five AI
+  providers match the Go version; `opencode` requires an explicit
+  `ai.baseUrl` rather than defaulting to a guessed local port.
+- **Version handling** is the CLI's `--version` from package.json; update
+  checks are left to npm, since binaries and the self-updater were cut.
 - **Not handled yet:** generated columns and identity `ALWAYS` columns on
   a pre-provisioned target; closure fetches are one query per row and
   edge (batching is a phase 5 item).
