@@ -11,19 +11,32 @@ export interface CliResult {
 }
 
 /** A CLI with its own working directory and user config, run in-process. */
-export function testCli(cwd = mkdtempSync(join(tmpdir(), "tributary-cli-"))) {
+/**
+ * `answers` stands in for a person at the terminal: each confirmation
+ * prompt takes the next one. Without it the CLI is non-interactive.
+ */
+export function testCli(cwd = mkdtempSync(join(tmpdir(), "tributary-cli-")), answers?: boolean[]) {
+  const prompts: string[] = [];
   const userConfig: UserConfigStore = openUserConfig({
     dir: mkdtempSync(join(tmpdir(), "tributary-config-")),
   });
   return {
     cwd,
     userConfig,
+    /** Every confirmation question asked so far. */
+    prompts,
     async run(...argv: string[]): Promise<CliResult> {
       let stdout = "";
       let stderr = "";
       const code = await run(argv, {
         cwd,
         userConfig,
+        ...(answers && {
+          confirm: async (message: string) => {
+            prompts.push(message);
+            return answers.shift() ?? false;
+          },
+        }),
         stdout: (s) => {
           stdout += s;
         },

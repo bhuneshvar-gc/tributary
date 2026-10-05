@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import {
@@ -33,6 +33,20 @@ export interface ProgramContext {
   userConfig: UserConfigStore;
   stdout: (text: string) => void;
   stderr: (text: string) => void;
+  /**
+   * Asks a yes/no question (default no). Absent when nobody can answer
+   * (not a terminal: CI, pipes), so commands fail with a hint instead.
+   */
+  confirm?: (message: string) => Promise<boolean>;
+}
+
+/** A y/N prompt on the terminal, or undefined when stdin/stderr aren't one. */
+function terminalConfirm(): ProgramContext["confirm"] {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return undefined;
+  return async (message) => {
+    const answer = await p.confirm({ message, initialValue: false, output: process.stderr });
+    return !p.isCancel(answer) && answer;
+  };
 }
 
 interface SubsetCommandOptions {
@@ -220,13 +234,24 @@ function addSchemaCommands(ctx: ProgramContext, program: Command): void {
         force?: boolean;
       }) => {
         const path = resolve(ctx.cwd, opts.output);
+        let overwrite = opts.force ?? false;
+        if (!overwrite && existsSync(path)) {
+          if (!ctx.confirm) {
+            throw new Error(`${opts.output} already exists; pass --force to overwrite it`);
+          }
+          if (!(await ctx.confirm(`${opts.output} already exists. Overwrite it?`))) {
+            ctx.stdout(`kept ${opts.output}; nothing written\n`);
+            return;
+          }
+          overwrite = true;
+        }
         const template = schemaTemplate(await inspectSource(ctx, opts.source), {
           format: opts.format,
         });
         mkdirSync(dirname(path), { recursive: true });
         try {
-          // "wx" creates the file or fails, so a file that appeared meanwhile is never clobbered.
-          writeFileSync(path, template.text, { flag: opts.force ? "w" : "wx" });
+          // Without an overwrite decision, "wx" fails rather than clobber a file that appeared meanwhile.
+          writeFileSync(path, template.text, { flag: overwrite ? "w" : "wx" });
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
           throw new Error(`${opts.output} already exists; pass --force to overwrite it`);
@@ -343,12 +368,11 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
         );
         if (opts.dryRun) return;
         if (command.command === "sync" && !opts.yes) {
-          const ok = await p.confirm({
-            message: "This writes to the target database. Run it?",
-            initialValue: false,
-            output: process.stderr,
-          });
-          if (p.isCancel(ok) || !ok) {
+          if (!ctx.confirm)
+            throw new Error(
+              "not at a terminal, so nobody can confirm the sync: pass --yes to run it",
+            );
+          if (!(await ctx.confirm("This writes to the target database. Run it?"))) {
             p.cancel("Not run.");
             return;
           }
@@ -410,11 +434,13 @@ function printSync(ctx: ProgramContext, result: SyncResult): void {
 
 /** Runs the CLI, printing errors readably and returning the exit code. */
 export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promise<number> {
+  const confirm = terminalConfirm();
   const context: ProgramContext = {
     cwd: process.cwd(),
     userConfig: openUserConfig(),
     stdout: (s) => process.stdout.write(s),
     stderr: (s) => process.stderr.write(s),
+    ...(confirm && { confirm }),
     ...ctx,
   };
   try {

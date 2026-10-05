@@ -33,8 +33,8 @@ tables:
 `;
 
 /** A CLI with a "src" connection to the fixture database. */
-function cliWithSource() {
-  const cli = testCli();
+function cliWithSource(answers?: boolean[]) {
+  const cli = testCli(undefined, answers);
   cli.userConfig.set("connections.src.url", source.url);
   return cli;
 }
@@ -260,7 +260,37 @@ describe("schema init", () => {
     );
   });
 
-  test("refuses to overwrite an existing file unless --force", async () => {
+  test("asks before overwriting an existing file, and overwrites on yes", async () => {
+    const cli = cliWithSource([true]);
+    writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\n# my edits\n");
+
+    const result = await cli.run("schema", "init", "--source", "src");
+
+    expect(cli.prompts).toEqual(["./schema.yaml already exists. Overwrite it?"]);
+    expect(result.code).toBe(0);
+    expect(readFileSync(join(cli.cwd, "schema.yaml"), "utf8")).not.toContain("# my edits");
+  });
+
+  test("answering no keeps the existing file", async () => {
+    const cli = cliWithSource([false]);
+    writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\n# my edits\n");
+
+    const result = await cli.run("schema", "init", "--source", "src");
+
+    expect(result).toMatchObject({ code: 0, stdout: "kept ./schema.yaml; nothing written\n" });
+    expect(readFileSync(join(cli.cwd, "schema.yaml"), "utf8")).toContain("# my edits");
+  });
+
+  test("--force overwrites without asking", async () => {
+    const cli = cliWithSource([false]);
+    writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\n# my edits\n");
+
+    expect((await cli.run("schema", "init", "--source", "src", "--force")).code).toBe(0);
+    expect(cli.prompts).toEqual([]);
+    expect(readFileSync(join(cli.cwd, "schema.yaml"), "utf8")).not.toContain("# my edits");
+  });
+
+  test("with nobody to ask (not a terminal), refuses to overwrite unless --force", async () => {
     const cli = cliWithSource();
     writeFileSync(join(cli.cwd, "schema.yaml"), "version: 1\n# my edits\n");
 

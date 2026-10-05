@@ -68,7 +68,8 @@ tables:
   every table by its schema-qualified name (`public.orders`, public included), its real
   foreign keys as comments, and each `*_id` column without one as a bare `# order_id:`
   line. Uncomment the ones that are references and add their target; nothing is guessed.
-  It won't overwrite an existing file without `--force`. `-o <path>` writes elsewhere,
+  If the file already exists it asks `y/N` before overwriting (`--force` skips the
+  question; with no terminal to ask, such as CI, it refuses unless `--force`). `-o <path>` writes elsewhere,
   and `--format json` writes JSON, which lists only the tables since JSON has no
   comments.
 - **Check one:** `tributary schema validate [--schema <file>] [--source prod]` checks the
