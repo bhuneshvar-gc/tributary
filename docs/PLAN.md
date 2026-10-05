@@ -45,31 +45,47 @@ users, so there is no compatibility contract.
 | CLI UX                | `@clack/prompts`, `cli-table3`, `picocolors`                               |
 | Local user config     | `conf`                                                                     |
 
-### Configuration (two layers)
+### Configuration and schema files
 
-1. **Local user config**: a JSON file on the user's machine
-   (e.g. `~/.config/tributary/config.json`), managed with
-   `tributary config set|get|list`. It holds:
-   - named connections: `connections.<name>.url` (e.g. `prod`, `local`)
-   - the AI provider, model and API key
-   - the target allowlist
+1. **Local user config**: `~/.config/tributary/config.json`
+   (`$XDG_CONFIG_HOME/tributary/`, `%APPDATA%\tributary\` on Windows,
+   `TRIBUTARY_CONFIG_DIR` to override), owner-only permissions, managed
+   with `tributary config set|get|unset|list|path`. It holds named
+   connections (`connections.<name>.url`), the AI provider/model/key and
+   the target allowlist. Secrets are stored in plaintext and shown
+   unmasked (an accepted trade-off).
 
-   Secrets are stored in plaintext and shown unmasked (an accepted
-   trade-off).
+2. **Schema file** (supersedes the earlier `tributary.config.ts`): facts
+   about the database that its catalog can't tell, i.e. app-level
+   relations, ignores and cycle breaks (masking rules later). It holds no
+   seeds, connections or run options. YAML or JSON, `version: 1`
+   required, grouped by table:
 
-2. **Project config**: `tributary.config.ts`, committed alongside the app:
-
-   ```ts
-   export default defineConfig({
-     source: 'prod',      // connection name from local config
-     target: 'local',
-     seeds: [...],        // seed predicates
-     relations: [...],    // app-level FKs pg_catalog can't see
-   })
+   ```yaml
+   version: 1
+   defaultSchema: public
+   tables:
+     line_items:
+       references:
+         order_id: orders.id
+         "tenant_id, cart_id": [carts.tenant_id, carts.id]
+       polymorphic:
+         subject_id: { typeColumn: subject_type, targets: { Post: posts.id } }
+       ignore: [legacy_user_id]
+       breakCycle: [parent_id]
    ```
 
-   Connections are referenced by name only, so the file holds no secrets.
-   The same object shape is accepted by the core library API.
+   `--schema <file>` picks it; otherwise the first of `./schema.yaml`,
+   `./schema.yml`, `./schema.json` is used (and named on stderr); with
+   none, only database foreign keys are followed, with a note.
+   `tributary schema init --source <name>` writes a template (real FKs as
+   comments, commented guesses for `*_id` columns, no overwrite without
+   `--force`); `tributary schema validate` checks format and, with
+   `--source`, existence of every table and column.
+
+3. **Run options are CLI flags**: `--source`/`--target` (required),
+   repeatable `-t/--seed-table` + `-w/--where` pairs, `--traversal`,
+   `--strict-cycles`, `--fresh`, `--no-create-schema`, `--json`.
 
 ### Checkpoints / resume
 
@@ -134,7 +150,7 @@ diverged branches, a custom CoW storage engine, non-Postgres sources.
 ## Build order
 
 1. Workspace scaffold (pnpm, tsc, Biome, vitest, CI)
-2. Config: zod schemas, `defineConfig`, local JSON store, `config set/get/list`
+2. Config: local JSON store and `config set/get/list`; schema file parser, `schema init`, `schema validate`
 3. Catalog: schema introspection (tables, columns, PKs, FKs, enums)
 4. Graph & closure: FK graph merged with declared relations
 5. Subset ordering: topological load order
@@ -178,9 +194,8 @@ Decisions made while building, superseding the tables above where they differ:
 - **Failed runs resume.** An unfinished run (interrupted _or_ failed)
   resumes from its completed tables; only a completed run or `--fresh`
   starts over.
-- **Multiple seeds.** `seeds: [...]` as the original plan sketched; one
-  closure covers all of them. `--seed-table`/`--where` replace the
-  configured seeds with a single one.
+- **Multiple seeds.** Repeat `-t/-w` pairs; one closure covers all of
+  them.
 - **Seed predicates are one statement.** They're interpolated (admin-tool
   trust model) but sent through the extended protocol, which Postgres
   limits to a single statement, so a predicate can't `COMMIT` its way out

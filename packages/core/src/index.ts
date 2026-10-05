@@ -9,5 +9,7 @@ export * from "./inspect.js";
 export * from "./load.js";
 export * from "./order.js";
 export * from "./plan.js";
+export * from "./schema-file.js";
+export * from "./schema-template.js";
 export * from "./state.js";
 export * from "./sync.js";

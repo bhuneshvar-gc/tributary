@@ -1,17 +1,36 @@
 import type { ForeignKey, Schema } from "./catalog.js";
 import { type AppliedBreak, type Closure, computeClosure } from "./closure.js";
-import { type ProjectConfig, parseProjectConfig, type Seed } from "./config.js";
+import type { Seed, Traversal } from "./config.js";
 import { connect, type Queryable, readOnly } from "./db.js";
 import { buildGraph, type Graph, type NodeId } from "./graph.js";
 import { inspect } from "./inspect.js";
 import { deferredColumns, deferredForeignKeys } from "./load.js";
 import { tableOrder } from "./order.js";
+import { EMPTY_SCHEMA_FILE, type SchemaFile } from "./schema-file.js";
 
-export interface PlanOptions {
+/** How the subset is computed, beyond where it starts. */
+export interface SubsetOptions {
+  /** Relations, ignores and cycle breaks the catalog can't tell (see loadSchemaFile). */
+  schema?: SchemaFile;
+  /** Default "downstream"; see TRAVERSALS. */
+  traversal?: Traversal;
+  /** Fail on a foreign key cycle with no breakCycle entry instead of auto-breaking it. */
+  strictCycles?: boolean;
+}
+
+export interface PlanOptions extends SubsetOptions {
   /** Source connection string. */
   source: string;
   seeds: Seed[];
-  config?: ProjectConfig;
+}
+
+/** SubsetOptions with every default filled in. */
+export function subsetDefaults(options: SubsetOptions): Required<SubsetOptions> {
+  return {
+    schema: options.schema ?? EMPTY_SCHEMA_FILE,
+    traversal: options.traversal ?? "downstream",
+    strictCycles: options.strictCycles ?? false,
+  };
 }
 
 /** The subset to load, and everything derived from the source needed to load it. */
@@ -32,12 +51,17 @@ export interface Subset {
 export async function computeSubset(
   source: Queryable,
   seeds: Seed[],
-  config: ProjectConfig,
+  options: SubsetOptions = {},
 ): Promise<Subset> {
+  const { schema: file, traversal, strictCycles } = subsetDefaults(options);
   const schema = await inspect(source);
-  const graph = buildGraph(schema, config);
-  const closure = await computeClosure(source, graph, seeds, config);
-  const deferred = deferredForeignKeys(schema, graph, closure, config.dependencyBreaks);
+  const graph = buildGraph(schema, file);
+  const closure = await computeClosure(source, graph, seeds, {
+    traversal,
+    strictCycles,
+    dependencyBreaks: file.dependencyBreaks,
+  });
+  const deferred = deferredForeignKeys(schema, graph, closure, file.dependencyBreaks);
   const order = tableOrder(schema, closure.rows.keys(), deferredColumns(deferred));
   return { schema, graph, closure, order, deferred };
 }
@@ -59,11 +83,10 @@ export interface PlanResult {
 
 /** Computes the subset without writing anything: per-table row counts in load order. */
 export async function plan(options: PlanOptions): Promise<PlanResult> {
-  const config = options.config ?? parseProjectConfig({});
   const source = await connect(options.source);
   try {
     const { graph, closure, order } = await readOnly(source, () =>
-      computeSubset(source, options.seeds, config),
+      computeSubset(source, options.seeds, options),
     );
     const seedTables = new Set(options.seeds.map((s) => s.table));
     const tables = order.map((table): PlanTable => {

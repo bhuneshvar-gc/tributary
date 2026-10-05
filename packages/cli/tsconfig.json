@@ -1,7 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": ".",
+    "rootDir": "../..",
     "customConditions": ["@bhuneshvar-k/source"],
     "allowImportingTsExtensions": true,
     "noEmit": true

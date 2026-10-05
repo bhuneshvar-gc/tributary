@@ -14,7 +14,7 @@ npm install -g @bhuneshvar-k/tributary   # Node >= 22.12
 ## Quick start
 
 Connections, the target allowlist and AI credentials live in a local JSON
-file (`tributary config path` shows where), never in your project:
+file, `~/.config/tributary/config.json` (`tributary config path` shows it):
 
 ```sh
 tributary config set connections.prod.url  'postgres://readonly@prod-db/app'
@@ -22,48 +22,56 @@ tributary config set connections.local.url 'postgres://localhost/app_dev'
 tributary config set allowlist localhost          # writable target hosts; empty = none
 ```
 
-The project config is safe to commit. It names connections; it doesn't contain them:
-
-```ts
-// tributary.config.ts
-import { defineConfig } from "@bhuneshvar-k/tributary";
-
-export default defineConfig({
-  source: "prod",
-  target: "local",
-  seeds: [
-    { table: "users", where: "email = 'admin@example.com'" },
-    { table: "feature_flags", where: "true" },
-  ],
-  relations: [
-    // app-level FKs pg_catalog can't see
-    { from: "orders.customer_ref", to: "users.id" },
-    {
-      from: ["line_items.tenant_id", "line_items.order_id"],
-      to: ["orders.tenant_id", "orders.id"],
-    },
-    // polymorphic associations
-    {
-      from: "comments.subject_id",
-      polymorphicType: "comments.subject_type",
-      targets: { Post: "posts.id", Photo: "photos.id" },
-    },
-    // stop following a real FK
-    { ignore: "audit_logs.actor_id" },
-  ],
-  // FK cycles to cut (loaded NULL, then backfilled)
-  dependencyBreaks: [{ table: "employees", column: "manager_id" }],
-});
-```
+Every run is spelled out on the command line:
 
 ```sh
-tributary plan                 # row counts per table, writes nothing
-tributary sync                 # copy the subset into the target
-tributary sync -t orders -w "id = 42"   # one seed instead of the configured ones
-tributary ai "copy the user admin@example.com and their orders"
+tributary plan -t users -w "email = 'admin@example.com'" --source prod            # row counts, writes nothing
+tributary sync -t users -w "email = 'admin@example.com'" --source prod --target local
+tributary sync -t users -w "id = 42" -t feature_flags -w true --source prod --target local   # several seeds
+tributary ai "copy the user admin@example.com and their orders" --source prod --target local
 ```
 
-`.json` and `.yaml` config files work too (`tributary.config.json`, ...).
+## Schema file
+
+Relationships your database doesn't declare as foreign keys (Rails/ORM
+associations, polymorphic columns) go in a **schema file**. It describes the
+database, not a run, so it holds no seeds or connections and can be committed:
+
+```yaml
+# schema.yaml
+version: 1                  # required
+defaultSchema: public       # optional; bare table names resolve here
+tables:
+  orders:
+    references:
+      customer_ref: users.id                                  # column -> table.column
+  line_items:
+    references:
+      "tenant_id, order_id": [orders.tenant_id, orders.id]    # composite, paired in order
+  comments:
+    polymorphic:
+      subject_id:
+        typeColumn: subject_type
+        targets: { Post: posts.id, Photo: media.photos.id }   # discriminator value -> table.column
+  audit_logs:
+    ignore: [actor_id]          # don't follow this real foreign key
+  employees:
+    breakCycle: [manager_id]    # cut a FK cycle: not followed, loaded NULL, backfilled
+```
+
+- **Format:** YAML or JSON, with the same structure. `"billing.invoices"`-style keys and
+  `schema.table.column` targets reach other schemas.
+- **Which file is used:** `--schema <file>` uses that file. Otherwise `./schema.yaml`,
+  `./schema.yml` or `./schema.json` is used, the first that exists, and the run prints
+  which. With no schema file, only database foreign keys are followed.
+- **Start one:** `tributary schema init --source prod` writes `./schema.yaml`. It lists
+  every table, with real foreign keys as comments and commented guesses for `*_id`
+  columns that have none; uncomment the right guesses. It won't overwrite an existing
+  file without `--force`. `-o <path>` writes elsewhere, and `--format json` writes JSON,
+  which has no room for the guesses.
+- **Check one:** `tributary schema validate [--schema <file>] [--source prod]` checks the
+  format, and with `--source`, that every table and column exists. It exits non-zero on
+  any problem, so it fits CI.
 
 AI providers: `anthropic` (default), `openai`, `google`, `openrouter` (set `ai.model`)
 and `opencode` (an OpenAI-compatible endpoint; set `ai.baseUrl` and `ai.model`).
@@ -71,7 +79,7 @@ and `opencode` (an OpenAI-compatible endpoint; set `ai.baseUrl` and `ai.model`).
 ## How it behaves
 
 - **Traversal.** A seed's children are followed, and so are the parents every row
-  needs. By default (`traversal: "downstream"`) a parent pulled in only to satisfy a
+  needs. By default (`--traversal downstream`) a parent pulled in only to satisfy a
   foreign key isn't used to fan back out to its other children. `--traversal full`
   fans out from every row.
 - **Re-runs upsert.** A row that's already on the target is updated to match the
@@ -108,19 +116,19 @@ and `opencode` (an OpenAI-compatible endpoint; set `ai.baseUrl` and `ai.model`).
 The engine is published separately as `@bhuneshvar-k/tributary-core`:
 
 ```ts
-import { parseProjectConfig, plan, sync } from "@bhuneshvar-k/tributary-core";
+import { loadSchemaFile, plan, sync } from "@bhuneshvar-k/tributary-core";
 
 const result = await sync({
   source: process.env.SOURCE_URL!,
   target: process.env.TARGET_URL!,
   seeds: [{ table: "public.users", where: "id = 42" }],
-  config: parseProjectConfig({ relations: [] }),
+  schema: await loadSchemaFile("schema.yaml"), // or parseSchemaFile({ version: 1, tables: {...} })
   allowlist: ["localhost"],
 });
 ```
 
-`inspect`, `buildGraph`, `computeClosure` and `tableOrder` are exported for
-lower-level use.
+`inspect`, `schemaTemplate`, `buildGraph`, `computeClosure` and `tableOrder` are
+exported for lower-level use.
 
 ## Development
 

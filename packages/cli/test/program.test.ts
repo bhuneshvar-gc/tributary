@@ -1,27 +1,10 @@
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { expect, test } from "vitest";
-import { run } from "../src/program.js";
-import { openUserConfig } from "../src/user-config.js";
+import { testCli } from "./support/cli.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
-async function cli(...argv: string[]) {
-  let stdout = "";
-  let stderr = "";
-  const code = await run(argv, {
-    cwd: mkdtempSync(join(tmpdir(), "tributary-cli-")),
-    userConfig: openUserConfig({ dir: mkdtempSync(join(tmpdir(), "tributary-config-")) }),
-    stdout: (s) => {
-      stdout += s;
-    },
-    stderr: (s) => {
-      stderr += s;
-    },
-  });
-  return { code, stdout, stderr };
-}
+const cli = (...argv: string[]) => testCli().run(...argv);
 
 test("--version prints the package version", async () => {
   expect(await cli("--version")).toEqual({ code: 0, stdout: `${pkg.version}\n`, stderr: "" });
@@ -34,7 +17,7 @@ test("a subcommand usage error returns an exit code instead of exiting the proce
     exited = true;
   }) as typeof process.exit;
   try {
-    const result = await cli("plan", "--no-such-flag");
+    const result = await cli("plan", "--source", "x", "--no-such-flag");
     expect(exited).toBe(false);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("unknown option '--no-such-flag'");

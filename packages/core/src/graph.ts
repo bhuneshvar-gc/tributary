@@ -1,12 +1,6 @@
 import { findColumn, type Schema, type Table, tableId } from "./catalog.js";
-import {
-  type ColumnRef,
-  ConfigError,
-  formatRef,
-  type ProjectConfig,
-  type Relation,
-  tableKey,
-} from "./config.js";
+import { type ColumnRef, ConfigError, formatRef, type Relation, tableKey } from "./config.js";
+import type { SchemaFile } from "./schema-file.js";
 
 /** A schema-qualified table identifier: "schema.table". */
 export type NodeId = string;
@@ -14,7 +8,7 @@ export type NodeId = string;
 /** A reference with a fixed target table. Columns pair by index. */
 export interface FixedEdge {
   kind: "fixed";
-  /** "catalog": a real FK constraint. "declared": a config relation. */
+  /** "catalog": a real FK constraint. "declared": a schema file relation. */
   source: "catalog" | "declared";
   from: NodeId;
   fromColumns: string[];
@@ -50,7 +44,7 @@ export function edgeTargets(e: Edge): NodeId[] {
 
 /**
  * The merged FK graph: tables from a catalog Schema, edges from real
- * constraints plus the project config's declared relations (minus
+ * constraints plus the schema file's declared relations (minus
  * ignores). Both directions are indexed so the closure walk can find a
  * row's parents and children by lookup.
  */
@@ -174,14 +168,12 @@ function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
 }
 
 /**
- * Merges a catalog schema with the project config's relations into a
- * Graph. Every relation is checked against the catalog; all unknown
- * table/column references are reported together in one ConfigError.
+ * Merges a catalog schema with a schema file's relations into a Graph.
+ * Every relation is checked against the catalog; all unknown table/column
+ * references are reported together in one ConfigError, each named by where
+ * the schema file declared it.
  */
-export function buildGraph(
-  schema: Schema,
-  config?: Pick<ProjectConfig, "relations"> & Partial<Pick<ProjectConfig, "dependencyBreaks">>,
-): Graph {
+export function buildGraph(schema: Schema, file?: Partial<SchemaFile>): Graph {
   const g = new Graph();
   for (const t of schema.tables) g.tables.set(tableId(t), t);
   for (const t of schema.tables) {
@@ -199,20 +191,20 @@ export function buildGraph(
   }
 
   const issues: string[] = [];
-  config?.relations.forEach((r, i) => {
+  file?.relations?.forEach((r, i) => {
     const problem = mergeRelation(g, r);
-    if (problem) issues.push(`relations.${i}: ${problem}`);
+    if (problem) issues.push(`${r.at ?? `relations.${i}`}: ${problem}`);
   });
   if (issues.length) throw new ConfigError(issues);
 
   g.indexCycles();
-  config?.dependencyBreaks?.forEach((b, i) => {
+  file?.dependencyBreaks?.forEach((b, i) => {
     const breaksACycle = g
       .outgoing(b.table)
       .some((e) => e.fromColumns.includes(b.column) && g.inCycle(e));
     if (!breaksACycle) {
       issues.push(
-        `dependencyBreaks.${i}: ${b.table}.${b.column} is not part of any foreign key cycle; remove it or fix the table/column`,
+        `${b.at ?? `dependencyBreaks.${i}`}: ${b.table}.${b.column} is not part of any foreign key cycle; remove it or fix the table/column`,
       );
     }
   });

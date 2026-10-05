@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { parse } from "pg-connection-string";
-import type { ProjectConfig, Seed } from "./config.js";
+import type { Seed, Traversal } from "./config.js";
 import type { Queryable, Row } from "./db.js";
+import type { SchemaFile } from "./schema-file.js";
 
 /**
  * Sync checkpoints, kept in the target database's `_tributary` schema so
@@ -18,15 +19,27 @@ function sha256(...parts: string[]): string {
   return h.digest("hex");
 }
 
-/** What identifies "the same sync" across invocations: where from, which seeds, which config. */
-export function runId(sourceUrl: string, seeds: Seed[], config: ProjectConfig): string {
+/**
+ * What identifies "the same sync" across invocations: where from, which
+ * seeds, which schema file contents, which traversal options.
+ */
+export function runId(
+  sourceUrl: string,
+  seeds: Seed[],
+  options: { schema: SchemaFile; traversal: Traversal; strictCycles: boolean },
+): string {
   const c = parse(sourceUrl);
   const source = `${c.host ?? "localhost"}:${c.port ?? 5432}/${c.database ?? ""}`;
-  const { relations, dependencyBreaks, traversal, strictCycles } = config;
+  const { schema, traversal, strictCycles } = options;
   return sha256(
     source,
     JSON.stringify(seeds),
-    JSON.stringify({ relations, dependencyBreaks, traversal, strictCycles }),
+    JSON.stringify({
+      relations: schema.relations,
+      breaks: schema.dependencyBreaks,
+      traversal,
+      strictCycles,
+    }),
   ).slice(0, 16);
 }
 

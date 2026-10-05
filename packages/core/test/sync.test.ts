@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  type ProjectConfigInput,
-  parseProjectConfig,
+  parseSchemaFile,
   plan,
   type SyncResult,
   sync,
@@ -15,8 +14,10 @@ function run(
   table: string,
   where: string,
   options: {
-    schema?: string;
-    config?: ProjectConfigInput;
+    /** Postgres schema of the seed table (default public). */
+    dbSchema?: string;
+    /** Schema file contents. */
+    schemaFile?: unknown;
     fresh?: boolean;
     createSchema?: boolean;
     allowlist?: string[];
@@ -25,8 +26,8 @@ function run(
   return sync({
     source: db.source.url,
     target: db.target.url,
-    seeds: [{ table: `${options.schema ?? "public"}.${table}`, where }],
-    config: parseProjectConfig(options.config ?? {}),
+    seeds: [{ table: `${options.dbSchema ?? "public"}.${table}`, where }],
+    schema: parseSchemaFile(options.schemaFile ?? { version: 1 }),
     allowlist: options.allowlist ?? ["127.0.0.1"],
     ...(options.fresh !== undefined && { fresh: options.fresh }),
     ...(options.createSchema !== undefined && {
@@ -152,7 +153,7 @@ test("a multi-table cycle loads with a dependency break, backfilling the broken 
     commit;`);
 
   const result = await run("cycle_a", "id = 1", {
-    config: { dependencyBreaks: [{ table: "cycle_a", column: "b_id" }] },
+    schemaFile: { version: 1, tables: { cycle_a: { breakCycle: ["b_id"] } } },
   });
 
   expect(result.tables.map((t) => t.table)).toEqual(["public.cycle_a", "public.cycle_b"]);
@@ -187,7 +188,7 @@ describe("custom types", () => {
       `insert into billing.invoice values (1, 'paid', 'closed', '{draft,paid}');`,
     );
 
-    const result = await run("invoice", "id = 1", { schema: "billing" });
+    const result = await run("invoice", "id = 1", { dbSchema: "billing" });
 
     expect(result.schema.typesCreated.sort()).toEqual([
       "billing.invoice_status",

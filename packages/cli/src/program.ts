@@ -1,12 +1,17 @@
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
 import {
+  buildGraph,
   inspect,
+  loadSchemaFile,
   type PlanResult,
-  type ProjectConfig,
   plan,
   qualifyTable,
+  type SchemaFile,
   type Seed,
   type SyncResult,
+  schemaTemplate,
   sync,
   TRAVERSALS,
   type Traversal,
@@ -16,7 +21,7 @@ import Table from "cli-table3";
 import { Command, Option } from "commander";
 import pc from "picocolors";
 import { createModel, generateCommand, toCliArgs } from "./ai.js";
-import { loadProjectConfig } from "./project-config.js";
+import { findSchemaFile, loadRunSchema, relabel } from "./schema-file.js";
 import { openUserConfig, type UserConfigStore } from "./user-config.js";
 
 // Both src/ and dist/ sit one level below the package root.
@@ -29,83 +34,81 @@ export interface ProgramContext {
   stderr: (text: string) => void;
 }
 
-interface ProjectOptions {
-  config?: string;
-  source?: string;
-}
-
-interface SeedOptions extends ProjectOptions {
-  seedTable?: string;
-  where?: string;
+interface SubsetCommandOptions {
+  source: string;
+  schema?: string;
+  seedTable: string[];
+  where: string[];
   traversal?: Traversal;
   strictCycles?: boolean;
   json?: boolean;
 }
 
-interface SyncCommandOptions extends SeedOptions {
-  target?: string;
+interface SyncCommandOptions extends SubsetCommandOptions {
+  target: string;
   fresh?: boolean;
   createSchema: boolean;
 }
 
-function projectOptions(cmd: Command): Command {
-  return cmd
-    .option("-c, --config <path>", "project config file (default: ./tributary.config.*)")
-    .option("-s, --source <name>", "source connection name (overrides the project config)");
-}
+const collect = (value: string, previous: string[]) => [...previous, value];
 
-function seedOptions(cmd: Command): Command {
-  return projectOptions(cmd)
-    .option("-t, --seed-table <table>", 'seed table, e.g. "users" or "billing.invoices"')
-    .option("-w, --where <sql>", 'raw SQL WHERE fragment selecting seed rows, e.g. "id = 42"')
+const SOURCE_FLAG = "-s, --source <name>";
+const SOURCE_HELP = "source connection name (see tributary config set connections.<name>.url)";
+const SCHEMA_FLAG = "--schema <file>";
+const SCHEMA_HELP =
+  "schema file with app-level relations (default: ./schema.yaml, ./schema.yml or ./schema.json)";
+
+function subsetOptions(cmd: Command): Command {
+  return cmd
+    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
+    .option(SCHEMA_FLAG, SCHEMA_HELP)
+    .option(
+      "-t, --seed-table <table>",
+      'seed table, e.g. "users" or "billing.invoices" (repeatable)',
+      collect,
+      [],
+    )
+    .option(
+      "-w, --where <sql>",
+      'WHERE fragment for the matching --seed-table, e.g. "id = 42"',
+      collect,
+      [],
+    )
     .addOption(
       new Option(
         "--traversal <mode>",
         "fan out from every row, not just the seeds' downstream",
       ).choices(TRAVERSALS),
     )
-    .option("--strict-cycles", "fail on a foreign key cycle with no dependency break")
+    .option("--strict-cycles", "fail on a foreign key cycle with no breakCycle entry")
     .option("--json", "print JSON");
 }
 
-/** The connection string for a source or target, by flag, then project config. */
-function connectionUrl(
-  ctx: ProgramContext,
-  role: "source" | "target",
-  flag: string | undefined,
-  config: ProjectConfig,
-): string {
-  const name = flag ?? config[role];
-  if (!name) {
+/** Pairs each --seed-table with the --where in the same position. */
+function seeds(opts: Pick<SubsetCommandOptions, "seedTable" | "where">): Seed[] {
+  const { seedTable: tables, where } = opts;
+  if (tables.length !== where.length) {
     throw new Error(
-      `no ${role} connection: pass --${role} <name> or set \`${role}\` in tributary.config.ts`,
+      `every --seed-table needs a --where (got ${tables.length} table${tables.length === 1 ? "" : "s"} and ${where.length} where)`,
     );
   }
-  return ctx.userConfig.connectionUrl(name);
+  if (tables.length === 0)
+    throw new Error("no seed: pass --seed-table <table> --where <sql> (repeat the pair for more)");
+  return tables.map((table, i) => ({ table: qualifyTable(table), where: where[i]! }));
 }
 
-async function resolveProject(ctx: ProgramContext, opts: SeedOptions) {
-  const config = await loadProjectConfig(ctx.cwd, opts.config);
-  const merged: ProjectConfig = {
-    ...config,
+/** Everything a plan or sync needs from the command line, resolved. */
+async function subset(ctx: ProgramContext, opts: SubsetCommandOptions) {
+  const source = ctx.userConfig.connectionUrl(opts.source);
+  const seedList = seeds(opts);
+  const schema = await loadRunSchema(ctx.cwd, opts.schema, (m) => ctx.stderr(`${pc.dim(m)}\n`));
+  return {
+    source,
+    seeds: seedList,
+    ...(schema && { schema }),
     ...(opts.traversal && { traversal: opts.traversal }),
     ...(opts.strictCycles && { strictCycles: true }),
   };
-  return { config: merged, sourceUrl: connectionUrl(ctx, "source", opts.source, config) };
-}
-
-/** --seed-table/--where replace the configured seeds with that one seed. */
-function resolveSeeds(config: ProjectConfig, opts: SeedOptions): Seed[] {
-  if (opts.seedTable || opts.where) {
-    if (!opts.seedTable || !opts.where) throw new Error("--seed-table and --where go together");
-    return [{ table: qualifyTable(opts.seedTable), where: opts.where }];
-  }
-  if (config.seeds.length === 0) {
-    throw new Error(
-      "no seed: pass --seed-table and --where, or set `seeds` in tributary.config.ts",
-    );
-  }
-  return config.seeds;
 }
 
 /** Prints `result` as JSON with --json, or with the human-readable printer. */
@@ -129,36 +132,33 @@ export function createProgram(ctx: ProgramContext): Command {
     .showHelpAfterError()
     .configureOutput({ writeOut: ctx.stdout, writeErr: ctx.stderr });
 
-  projectOptions(program.command("inspect"))
+  program
+    .command("inspect")
     .description("print the source schema (tables, columns, keys) as JSON")
-    .action(async (opts: ProjectOptions) => {
-      const { sourceUrl } = await resolveProject(ctx, opts);
-      ctx.stdout(`${JSON.stringify(await inspect(sourceUrl), null, 2)}\n`);
+    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
+    .action(async (opts: { source: string }) => {
+      const schema = await inspect(ctx.userConfig.connectionUrl(opts.source));
+      ctx.stdout(`${JSON.stringify(schema, null, 2)}\n`);
     });
 
-  seedOptions(program.command("plan"))
+  subsetOptions(program.command("plan"))
     .description("compute the subset and report row counts per table, writing nothing")
-    .action(async (opts: SeedOptions) => {
-      const { config, sourceUrl } = await resolveProject(ctx, opts);
-      const result = await plan({ source: sourceUrl, seeds: resolveSeeds(config, opts), config });
-      output(ctx, opts.json, result, (r) => printPlan(ctx, r));
+    .action(async (opts: SubsetCommandOptions) => {
+      output(ctx, opts.json, await plan(await subset(ctx, opts)), (r) => printPlan(ctx, r));
     });
 
-  seedOptions(program.command("sync"))
+  subsetOptions(program.command("sync"))
     .description("copy the subset from source into target (upserting; safe to re-run)")
-    .option("-T, --target <name>", "target connection name (overrides the project config)")
+    .requiredOption("-T, --target <name>", "target connection name")
     .option(
       "--fresh",
       "delete the subset's rows from target first, and don't resume an earlier run",
     )
     .option("--no-create-schema", "fail instead of creating missing target tables")
     .action(async (opts: SyncCommandOptions) => {
-      const { config, sourceUrl } = await resolveProject(ctx, opts);
       const result = await sync({
-        source: sourceUrl,
-        target: connectionUrl(ctx, "target", opts.target, config),
-        seeds: resolveSeeds(config, opts),
-        config,
+        ...(await subset(ctx, opts)),
+        target: ctx.userConfig.connectionUrl(opts.target),
         allowlist: ctx.userConfig.allowlist(),
         fresh: opts.fresh ?? false,
         createSchema: opts.createSchema,
@@ -166,6 +166,80 @@ export function createProgram(ctx: ProgramContext): Command {
       output(ctx, opts.json, result, (r) => printSync(ctx, r));
     });
 
+  addSchemaCommands(ctx, program);
+  addConfigCommands(ctx, program);
+  addAiCommand(ctx, program);
+  return program;
+}
+
+function addSchemaCommands(ctx: ProgramContext, program: Command): void {
+  const schema = program
+    .command("schema")
+    .description("create and check schema files (app-level relations)");
+
+  schema
+    .command("init")
+    .description(
+      "write a starting schema file from the source database, with guessed references commented out",
+    )
+    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
+    .option("-o, --output <file>", "where to write it", "./schema.yaml")
+    .addOption(
+      new Option("--format <format>", "file format").choices(["yaml", "json"]).default("yaml"),
+    )
+    .option("--force", "overwrite an existing file")
+    .action(
+      async (opts: {
+        source: string;
+        output: string;
+        format: "yaml" | "json";
+        force?: boolean;
+      }) => {
+        const path = resolve(ctx.cwd, opts.output);
+        if (existsSync(path) && !opts.force) {
+          throw new Error(`${opts.output} already exists; pass --force to overwrite it`);
+        }
+        const db = await inspect(ctx.userConfig.connectionUrl(opts.source));
+        const template = schemaTemplate(db, { format: opts.format });
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, template.text);
+        ctx.stdout(
+          `wrote ${opts.output}: ${template.tables} tables, ${template.suggestions} guessed references to review\n`,
+        );
+        if (opts.format === "json") {
+          ctx.stderr(
+            `${pc.dim("note: JSON can't hold comments, so guessed references are only written in the YAML format")}\n`,
+          );
+        }
+      },
+    );
+
+  schema
+    .command("validate")
+    .description(
+      "check a schema file's format, and with --source that its tables and columns exist",
+    )
+    .option(SCHEMA_FLAG, SCHEMA_HELP)
+    .option(SOURCE_FLAG, "also check against this source connection's database")
+    .action(async (opts: { schema?: string; source?: string }) => {
+      const found = findSchemaFile(ctx.cwd, opts.schema);
+      if (!found) {
+        throw new Error(
+          "no schema file: pass --schema <file> or create ./schema.yaml (tributary schema init)",
+        );
+      }
+      let file: SchemaFile;
+      try {
+        file = await loadSchemaFile(found.path);
+        if (opts.source) buildGraph(await inspect(ctx.userConfig.connectionUrl(opts.source)), file);
+      } catch (e) {
+        throw relabel(e, found);
+      }
+      ctx.stdout(`${found.shown}: valid\n`);
+    });
+}
+
+function addConfigCommands(ctx: ProgramContext, program: Command): void {
   const config = program
     .command("config")
     .description("manage local settings (connections, allowlist, AI)");
@@ -187,41 +261,45 @@ export function createProgram(ctx: ProgramContext): Command {
     .command("path")
     .description("print where settings are stored")
     .action(() => ctx.stdout(`${ctx.userConfig.path}\n`));
+}
 
-  projectOptions(program.command("ai"))
+function addAiCommand(ctx: ProgramContext, program: Command): void {
+  program
+    .command("ai")
     .description("describe what you want in plain language; tributary picks the command")
     .argument("<request...>", 'e.g. "copy the user admin@example.com and their orders"')
+    .requiredOption(SOURCE_FLAG, SOURCE_HELP)
     .option("-T, --target <name>", "target connection name, for a generated sync")
+    .option(SCHEMA_FLAG, SCHEMA_HELP)
     .option("-y, --yes", "run a generated sync without asking")
     .option("--dry-run", "only show the generated command")
     .action(
       async (
         words: string[],
-        opts: ProjectOptions & { target?: string; yes?: boolean; dryRun?: boolean },
+        opts: { source: string; target?: string; schema?: string; yes?: boolean; dryRun?: boolean },
       ) => {
-        const { sourceUrl } = await resolveProject(ctx, opts);
         const spinner = p.spinner({ output: process.stderr });
         spinner.start("Reading the source schema");
         let command: Awaited<ReturnType<typeof generateCommand>>;
         try {
-          const schema = await inspect(sourceUrl);
+          const db = await inspect(ctx.userConfig.connectionUrl(opts.source));
           spinner.message("Asking the model");
           command = await generateCommand(
             createModel(ctx.userConfig.all().ai),
             words.join(" "),
-            schema,
+            db,
           );
         } finally {
           spinner.stop();
         }
 
         const args = toCliArgs(command);
-        for (const [flag, value] of [
-          ["--config", opts.config],
-          ["--source", opts.source],
-          ["--target", command.command === "sync" ? opts.target : undefined],
-        ] as const) {
-          if (value) args.push(flag, value);
+        if (command.command !== "inspect" && opts.schema) args.push("--schema", opts.schema);
+        args.push("--source", opts.source);
+        if (command.command === "sync") {
+          if (!opts.target)
+            throw new Error("the request needs a sync: pass --target <name> to say where to");
+          args.push("--target", opts.target);
         }
         const warnings = command.warnings.map((w) => pc.yellow(`! ${w}`)).join("\n");
         p.note(
@@ -249,8 +327,6 @@ export function createProgram(ctx: ProgramContext): Command {
         await createProgram(ctx).parseAsync(args, { from: "user" });
       },
     );
-
-  return program;
 }
 
 function shellQuote(arg: string): string {
@@ -271,8 +347,8 @@ function printPlan(ctx: ProgramContext, result: PlanResult): void {
     const note = row.break
       ? pc.dim(
           row.break.auto
-            ? " (cycle auto-broken; add a dependencyBreaks entry to control this)"
-            : " (dependency break applied)",
+            ? " (cycle auto-broken; add it to breakCycle in the schema file to control this)"
+            : " (breakCycle applied)",
         )
       : "";
     t.push([row.table, String(row.rows), row.via + note]);

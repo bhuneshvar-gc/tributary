@@ -5,33 +5,42 @@ import {
   computeClosure,
   connect,
   inspect,
-  type ProjectConfigInput,
-  parseProjectConfig,
+  parseSchemaFile,
+  type Traversal,
 } from "../src/index.js";
 import { useDatabases } from "./support/engine.js";
 
 const db = useDatabases();
 
-const polymorphic: ProjectConfigInput = {
-  relations: [
-    {
-      from: "poly_source_table.target_id",
-      polymorphicType: "poly_source_table.target_type",
-      targets: { A: "poly_target_a.id", B: "poly_target_b.id" },
+const polymorphic = {
+  schema: {
+    version: 1,
+    tables: {
+      poly_source_table: {
+        polymorphic: {
+          target_id: {
+            typeColumn: "target_type",
+            targets: { A: "poly_target_a.id", B: "poly_target_b.id" },
+          },
+        },
+      },
     },
-  ],
+  },
 };
 
 async function closureOf(
   table: string,
   where: string,
-  input: ProjectConfigInput = {},
+  options: { schema?: unknown; traversal?: Traversal; strictCycles?: boolean } = {},
 ): Promise<Closure> {
-  const config = parseProjectConfig(input);
-  const graph = buildGraph(await inspect(db.source.url), config);
+  const file = parseSchemaFile(options.schema ?? { version: 1 });
+  const graph = buildGraph(await inspect(db.source.url), file);
   const client = await connect(db.source.url);
   try {
-    return await computeClosure(client, graph, [{ table: `public.${table}`, where }], config);
+    return await computeClosure(client, graph, [{ table: `public.${table}`, where }], {
+      ...options,
+      dependencyBreaks: file.dependencyBreaks,
+    });
   } finally {
     await client.end();
   }
@@ -67,20 +76,14 @@ test("several seeds produce one closure covering all of them", async () => {
     insert into parent_table values (1, 'p1'), (2, 'p2');
     insert into child_table values (10, 1, 'c10'), (20, 2, 'c20');
     insert into leaf_table values (7, 'l7');`);
-  const config = parseProjectConfig({});
-  const graph = buildGraph(await inspect(db.source.url), config);
+  const graph = buildGraph(await inspect(db.source.url));
   const client = await connect(db.source.url);
   try {
-    const closure = await computeClosure(
-      client,
-      graph,
-      [
-        { table: "public.child_table", where: "id = 10" },
-        { table: "public.parent_table", where: "id = 2" },
-        { table: "public.leaf_table", where: "true" },
-      ],
-      config,
-    );
+    const closure = await computeClosure(client, graph, [
+      { table: "public.child_table", where: "id = 10" },
+      { table: "public.parent_table", where: "id = 2" },
+      { table: "public.leaf_table", where: "true" },
+    ]);
     expect(ids(closure)).toEqual({
       "public.child_table": ["10", "20"],
       "public.parent_table": ["1", "2"],
@@ -143,11 +146,11 @@ describe("cycles", () => {
     expect(ids(closure)).toEqual({ "public.self_ref_table": ["2", "3"] });
   });
 
-  test("a configured dependency break is applied, not auto", async () => {
+  test("a breakCycle from the schema file is applied, not auto", async () => {
     await db.source.exec(`insert into self_ref_table values (1, null), (2, 1);`);
 
     const closure = await closureOf("self_ref_table", "id = 2", {
-      dependencyBreaks: [{ table: "self_ref_table", column: "next_id" }],
+      schema: { version: 1, tables: { self_ref_table: { breakCycle: ["next_id"] } } },
     });
     expect(closure.breaks).toEqual([
       { table: "public.self_ref_table", column: "next_id", auto: false },
@@ -203,7 +206,7 @@ describe("polymorphic associations", () => {
     const closure = await closureOf("poly_source_table", "id = 1", polymorphic);
     expect(ids(closure)).toEqual({ "public.poly_source_table": ["1"] });
     expect(closure.warnings).toEqual([
-      'public.poly_source_table.target_type: unrecognized polymorphic type value "Z", no matching target in config; skipped',
+      'public.poly_source_table.target_type: unrecognized polymorphic type value "Z", no matching target in the schema file; skipped',
     ]);
   });
 });

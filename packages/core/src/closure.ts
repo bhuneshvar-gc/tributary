@@ -188,7 +188,7 @@ class Walker {
     const target = e.targets[typeValue];
     if (!target) {
       this.closure.warnings.push(
-        `${e.from}.${e.typeColumn}: unrecognized polymorphic type value "${typeValue}", no matching target in config; skipped`,
+        `${e.from}.${e.typeColumn}: unrecognized polymorphic type value "${typeValue}", no matching target in the schema file; skipped`,
       );
       return [];
     }

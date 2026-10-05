@@ -1,6 +1,5 @@
 import { tableId } from "./catalog.js";
 import type { AppliedBreak } from "./closure.js";
-import { type ProjectConfig, parseProjectConfig } from "./config.js";
 import { connect, type Queryable, readOnly, transaction } from "./db.js";
 import { ensureSchema, type SchemaReport } from "./ddl.js";
 import type { NodeId } from "./graph.js";
@@ -13,7 +12,7 @@ import {
   explainLoadError,
   upsertRows,
 } from "./load.js";
-import { computeSubset, type PlanOptions, type Subset } from "./plan.js";
+import { computeSubset, type PlanOptions, type Subset, subsetDefaults } from "./plan.js";
 import {
   completedTables,
   ensureStateSchema,
@@ -64,7 +63,6 @@ export interface SyncResult {
  */
 export async function sync(options: SyncOptions): Promise<SyncResult> {
   checkTargetAllowed(options.target, options.allowlist);
-  const config = options.config ?? parseProjectConfig({});
   const source = await connect(options.source);
   let target: Awaited<ReturnType<typeof connect>> | undefined;
   try {
@@ -73,9 +71,9 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
     const targetIdentity = await databaseIdentity(targetClient);
     const subset = await readOnly(source, async () => {
       assertDifferentDatabases(await databaseIdentity(source), targetIdentity);
-      return computeSubset(source, options.seeds, config);
+      return computeSubset(source, options.seeds, options);
     });
-    return await load(targetClient, { ...options, config }, subset);
+    return await load(targetClient, options, subset);
   } finally {
     await Promise.all([source.end(), target?.end()]);
   }
@@ -83,7 +81,7 @@ export async function sync(options: SyncOptions): Promise<SyncResult> {
 
 async function load(
   target: Queryable,
-  options: SyncOptions & { config: ProjectConfig },
+  options: SyncOptions,
   { schema, closure, order, deferred }: Subset,
 ): Promise<SyncResult> {
   const tables = new Map(schema.tables.map((t) => [tableId(t), t]));
@@ -93,7 +91,7 @@ async function load(
 
   const report = await ensureSchema(target, schema, order, options.createSchema ?? true);
   await ensureStateSchema(target);
-  const runId = runIdFor(options.source, options.seeds, options.config);
+  const runId = runIdFor(options.source, options.seeds, subsetDefaults(options));
   await startRun(target, runId, options.fresh ?? false);
 
   try {

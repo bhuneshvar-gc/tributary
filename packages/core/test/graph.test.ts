@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildGraph, ConfigError, parseProjectConfig } from "../src/index.js";
+import { buildGraph, ConfigError, parseSchemaFile } from "../src/index.js";
 import { fk, schema, table } from "./support/schema.js";
 
 const users = table("public.users", ["id", "company_id"], {
@@ -28,9 +28,7 @@ describe("buildGraph", () => {
     const orders = table("public.orders", ["id", "user_ref"]);
     const g = buildGraph(
       schema(users, companies, orders),
-      parseProjectConfig({
-        relations: [{ from: "orders.user_ref", to: "users.id" }],
-      }),
+      parseSchemaFile({ version: 1, tables: { orders: { references: { user_ref: "users.id" } } } }),
     );
     expect(g.outgoing("public.orders")).toEqual([
       {
@@ -50,14 +48,18 @@ describe("buildGraph", () => {
     const posts = table("public.posts", ["id"]);
     const g = buildGraph(
       schema(comments, posts, users, companies),
-      parseProjectConfig({
-        relations: [
-          {
-            from: "comments.subject_id",
-            polymorphicType: "comments.subject_type",
-            targets: { Post: "posts.id", User: "users.id" },
+      parseSchemaFile({
+        version: 1,
+        tables: {
+          comments: {
+            polymorphic: {
+              subject_id: {
+                typeColumn: "subject_type",
+                targets: { Post: "posts.id", User: "users.id" },
+              },
+            },
           },
-        ],
+        },
       }),
     );
     const [edge] = g.outgoing("public.comments");
@@ -80,7 +82,7 @@ describe("buildGraph", () => {
   test("an ignore removes the catalog foreign key using that column", () => {
     const g = buildGraph(
       schema(users, companies),
-      parseProjectConfig({ relations: [{ ignore: "users.company_id" }] }),
+      parseSchemaFile({ version: 1, tables: { users: { ignore: ["company_id"] } } }),
     );
     expect(g.outgoing("public.users")).toEqual([]);
     expect(g.incoming("public.companies")).toEqual([]);
@@ -91,10 +93,10 @@ describe("buildGraph", () => {
     expect(() =>
       buildGraph(
         schema(users, companies),
-        parseProjectConfig({ relations: [{ ignore: "users.id" }] }),
+        parseSchemaFile({ version: 1, tables: { users: { ignore: ["id"] } } }),
       ),
     ).toThrow(
-      /relations\.0: ignore=public\.users\.id: no catalog foreign key on "public\.users" uses column "id"/,
+      /tables\.users\.ignore\.0: ignore=public\.users\.id: no catalog foreign key on "public\.users" uses column "id"/,
     );
   });
 
@@ -103,16 +105,15 @@ describe("buildGraph", () => {
     try {
       buildGraph(
         schema(users, companies),
-        parseProjectConfig({
-          relations: [
-            { from: "orders.user_ref", to: "users.id" },
-            { from: "users.nope", to: "companies.id" },
-            {
-              from: "users.company_id",
-              polymorphicType: "users.kind",
-              targets: { A: "companies.id" },
+        parseSchemaFile({
+          version: 1,
+          tables: {
+            orders: { references: { user_ref: "users.id" } },
+            users: {
+              references: { nope: "companies.id" },
+              polymorphic: { company_id: { typeColumn: "kind", targets: { A: "companies.id" } } },
             },
-          ],
+          },
         }),
       );
     } catch (e) {
@@ -120,9 +121,9 @@ describe("buildGraph", () => {
     }
     expect(error).toBeInstanceOf(ConfigError);
     expect((error as ConfigError).issues).toEqual([
-      'relations.0: from=public.orders.user_ref: no such table "public.orders" in source schema',
-      'relations.1: from=public.users.nope: no such column "nope" on "public.users"',
-      'relations.2: polymorphicType=public.users.kind: no such column "kind" on "public.users"',
+      'tables.orders.references.user_ref: from=public.orders.user_ref: no such table "public.orders" in source schema',
+      'tables.users.references.nope: from=public.users.nope: no such column "nope" on "public.users"',
+      'tables.users.polymorphic.company_id: polymorphicType=public.users.kind: no such column "kind" on "public.users"',
     ]);
   });
 
@@ -152,20 +153,16 @@ describe("buildGraph", () => {
       expect(() =>
         buildGraph(
           tables,
-          parseProjectConfig({
-            dependencyBreaks: [{ table: "employees", column: "manager_id" }],
-          }),
+          parseSchemaFile({ version: 1, tables: { employees: { breakCycle: ["manager_id"] } } }),
         ),
       ).not.toThrow();
       expect(() =>
         buildGraph(
           tables,
-          parseProjectConfig({
-            dependencyBreaks: [{ table: "users", column: "company_id" }],
-          }),
+          parseSchemaFile({ version: 1, tables: { users: { breakCycle: ["company_id"] } } }),
         ),
       ).toThrow(
-        /dependencyBreaks\.0: public\.users\.company_id is not part of any foreign key cycle/,
+        /tables\.users\.breakCycle\.0: public\.users\.company_id is not part of any foreign key cycle/,
       );
     });
   });
