@@ -398,3 +398,24 @@ describe("schema validate", () => {
     );
   });
 });
+
+test("plan shows its progress while collecting the subset", async () => {
+  const progress: string[] = [];
+  const cli = testCli(undefined, undefined, undefined, (m) => progress.push(m));
+  cli.userConfig.set("connections.src.url", source.url);
+
+  const result = await cli.run(
+    "plan",
+    "--source",
+    "src",
+    "-t",
+    "parent_table",
+    "-w",
+    "id = 1",
+    "--json",
+  );
+
+  expect(result.code).toBe(0);
+  expect(progress[0]).toBe("reading the source schema");
+  expect(progress.at(-1)).toBe("collecting the subset: 2 rows across 2 tables");
+});

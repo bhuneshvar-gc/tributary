@@ -104,7 +104,9 @@ async function load(
 
     const done = await completedTables(target, runId);
     const results: SyncTable[] = [];
-    for (const id of order) {
+    const progress = subsetDefaults(options).onProgress;
+    for (const [index, id] of order.entries()) {
+      progress({ phase: "loading", table: id, index: index + 1, total: order.length });
       const fingerprint = rowsFingerprint(closure.rows.get(id)!);
       const result: SyncTable = {
         table: id,

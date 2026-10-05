@@ -214,3 +214,95 @@ describe("polymorphic associations", () => {
 test("an unknown seed table is an error", async () => {
   await expect(closureOf("nope", "true")).rejects.toThrow(/no such table "public\.nope"/);
 });
+
+describe("round trips", () => {
+  /** Runs a closure through a client that records every query it sends. */
+  async function counted(seeds: { table: string; where: string }[]) {
+    const graph = buildGraph(await inspect(db.source.url));
+    const client = await connect(db.source.url);
+    const queries: string[] = [];
+    const counting = {
+      query: (text: unknown, values?: unknown[]) => {
+        queries.push(typeof text === "string" ? text : (text as { text: string }).text);
+        return client.query(text as string, values);
+      },
+    };
+    try {
+      const closure = await computeClosure(counting, graph, seeds);
+      return { closure, queries };
+    } finally {
+      await client.end();
+    }
+  }
+
+  test("children of many rows are fetched in one query per edge, not one per row", async () => {
+    await db.source.exec(`
+      insert into parent_table select g, 'p' || g from generate_series(1, 200) g;
+      insert into child_table select g, g, 'c' || g from generate_series(1, 200) g;`);
+
+    const { closure, queries } = await counted([{ table: "public.parent_table", where: "true" }]);
+
+    expect(ids(closure)["public.child_table"]).toHaveLength(200);
+    expect(queries.length).toBeLessThanOrEqual(4);
+  });
+
+  test("a parent shared by many rows is fetched once", async () => {
+    await db.source.exec(`
+      insert into parent_table values (1, 'p1');
+      insert into child_table select g, 1, 'c' || g from generate_series(1, 300) g;`);
+
+    const { closure, queries } = await counted([{ table: "public.child_table", where: "true" }]);
+
+    expect(ids(closure)["public.parent_table"]).toEqual(["1"]);
+    expect(queries.filter((q) => /FROM public\.parent_table\b/.test(q))).toHaveLength(1);
+  });
+
+  test("a parent already collected isn't fetched again", async () => {
+    await db.source.exec(`
+      insert into parent_table values (1, 'p1');
+      insert into child_table values (10, 1, 'c10');`);
+
+    const { queries } = await counted([
+      { table: "public.parent_table", where: "id = 1" },
+      { table: "public.child_table", where: "id = 10" },
+    ]);
+
+    // The seed query is the only one that touches parent_table.
+    expect(queries.filter((q) => /FROM public\.parent_table\b/.test(q))).toHaveLength(1);
+  });
+
+  test("composite keys are batched too, keeping their column pairing", async () => {
+    await db.source.exec(`
+      insert into tenant_table values (1), (2);
+      insert into composite_parent_table values (1, 5, 't1'), (2, 5, 't2'), (1, 6, 't1-6');
+      insert into composite_child_table values (1, 5, 2, 'a'), (2, 6, 1, 'b'), (3, 5, 2, 'c');`);
+
+    const { closure, queries } = await counted([
+      { table: "public.composite_child_table", where: "true" },
+    ]);
+
+    const parents = [...closure.rows.get("public.composite_parent_table")!.values()]
+      .map((r) => r.name)
+      .sort();
+    expect(parents).toEqual(["t1-6", "t2"]);
+    expect(queries.filter((q) => /FROM public\.composite_parent_table\b/.test(q))).toHaveLength(1);
+  });
+});
+
+test("progress is reported as rows are collected", async () => {
+  await db.source.exec(`
+    insert into parent_table values (1, 'p1');
+    insert into child_table values (10, 1, 'c10'), (11, 1, 'c11');`);
+  const graph = buildGraph(await inspect(db.source.url));
+  const client = await connect(db.source.url);
+  const reports: { rows: number; tables: number }[] = [];
+  try {
+    await computeClosure(client, graph, [{ table: "public.parent_table", where: "id = 1" }], {
+      onProgress: (p) => reports.push({ rows: p.rows, tables: p.tables }),
+    });
+  } finally {
+    await client.end();
+  }
+  expect(reports.at(-1)).toEqual({ rows: 3, tables: 2 });
+  expect(reports.length).toBeGreaterThan(1);
+});

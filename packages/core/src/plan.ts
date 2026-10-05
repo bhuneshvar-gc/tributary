@@ -16,7 +16,15 @@ export interface SubsetOptions {
   traversal?: Traversal;
   /** Fail on a foreign key cycle with no breakCycle entry instead of auto-breaking it. */
   strictCycles?: boolean;
+  /** Called as the work advances, e.g. to show progress. */
+  onProgress?: (event: SubsetProgress) => void;
 }
+
+/** What a plan or sync is doing right now. */
+export type SubsetProgress =
+  | { phase: "inspecting" }
+  | { phase: "collecting"; rows: number; tables: number }
+  | { phase: "loading"; table: NodeId; index: number; total: number };
 
 export interface PlanOptions extends SubsetOptions {
   /** Source connection string. */
@@ -30,6 +38,7 @@ export function subsetDefaults(options: SubsetOptions): Required<SubsetOptions> 
     schema: options.schema ?? emptySchemaFile(),
     traversal: options.traversal ?? "downstream",
     strictCycles: options.strictCycles ?? false,
+    onProgress: options.onProgress ?? (() => {}),
   };
 }
 
@@ -54,13 +63,15 @@ export async function computeSubset(
   seeds: Seed[],
   options: SubsetOptions = {},
 ): Promise<Subset> {
-  const { schema: file, traversal, strictCycles } = subsetDefaults(options);
+  const { schema: file, traversal, strictCycles, onProgress } = subsetDefaults(options);
+  onProgress({ phase: "inspecting" });
   const catalog = await inspect(source);
   const graph = buildGraph(catalog, file);
   const closure = await computeClosure(source, graph, seeds, {
     traversal,
     strictCycles,
     cycleBreaks: file.cycleBreaks,
+    onProgress: ({ rows, tables }) => onProgress({ phase: "collecting", rows, tables }),
   });
   const deferred = deferredForeignKeys(catalog, graph, closure, file.cycleBreaks);
   const order = tableOrder(catalog, closure.rows.keys(), deferredColumns(deferred));

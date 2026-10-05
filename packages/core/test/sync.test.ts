@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   parseSchemaFile,
   plan,
+  type SubsetProgress,
   type SyncResult,
   sync,
   TargetNotAllowedError,
@@ -411,5 +412,30 @@ test("plan reports row counts in load order and how each table was reached", asy
       via: "seed",
       break: { table: "public.self_ref_table", column: "next_id", auto: true },
     },
+  ]);
+});
+
+test("sync reports progress: inspecting, collecting rows, then loading each table", async () => {
+  await db.source.exec(`
+    insert into parent_table values (1, 'p1');
+    insert into child_table values (10, 1, 'c10');`);
+  const events: SubsetProgress[] = [];
+
+  await sync({
+    source: db.source.url,
+    target: db.target.url,
+    seeds: [{ table: "public.parent_table", where: "id = 1" }],
+    allowlist: ["127.0.0.1"],
+    onProgress: (e) => events.push(e),
+  });
+
+  expect(events[0]).toEqual({ phase: "inspecting" });
+  expect(events.filter((e) => e.phase === "collecting").at(-1)).toMatchObject({
+    rows: 2,
+    tables: 2,
+  });
+  expect(events.filter((e) => e.phase === "loading")).toEqual([
+    { phase: "loading", table: "public.parent_table", index: 1, total: 2 },
+    { phase: "loading", table: "public.child_table", index: 2, total: 2 },
   ]);
 });

@@ -29,6 +29,7 @@ export function testCli(
   cwd = mkdtempSync(join(tmpdir(), "tributary-cli-")),
   answers?: boolean[],
   updates: UpdateSource = offline,
+  progress?: (message: string) => void,
 ) {
   const prompts: string[] = [];
   const userConfig: UserConfigStore = openUserConfig({
@@ -46,6 +47,7 @@ export function testCli(
         cwd,
         userConfig,
         updates,
+        ...(progress && { progress }),
         ...(answers && {
           confirm: async (message: string) => {
             prompts.push(message);

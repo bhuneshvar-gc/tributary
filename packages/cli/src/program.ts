@@ -11,6 +11,7 @@ import {
   type SchemaFile,
   SchemaFileError,
   type Seed,
+  type SubsetProgress,
   type SyncResult,
   schemaTemplate,
   sync,
@@ -51,6 +52,37 @@ export interface ProgramContext {
   confirm?: (message: string) => Promise<boolean>;
   /** Where new versions are looked up and installed from. */
   updates: UpdateSource;
+  /** Shows what a long command is doing; absent when stderr isn't a terminal. */
+  progress?: (message: string) => void;
+}
+
+/** A spinner on stderr whose text follows the work, started on first use. */
+function terminalProgress() {
+  if (!process.stderr.isTTY) return undefined;
+  let spinner: ReturnType<typeof p.spinner> | undefined;
+  return {
+    update(message: string) {
+      if (!spinner) {
+        spinner = p.spinner({ output: process.stderr });
+        spinner.start(message);
+      } else spinner.message(message);
+    },
+    stop() {
+      spinner?.stop();
+      spinner = undefined;
+    },
+  };
+}
+
+function describeProgress(event: SubsetProgress): string {
+  switch (event.phase) {
+    case "inspecting":
+      return "reading the source schema";
+    case "collecting":
+      return `collecting the subset: ${event.rows.toLocaleString("en-US")} rows across ${event.tables} tables`;
+    case "loading":
+      return `loading ${event.table} (${event.index}/${event.total})`;
+  }
 }
 
 /** A y/N prompt on the terminal, or undefined when stdin/stderr aren't one. */
@@ -160,6 +192,9 @@ async function subset(ctx: ProgramContext, opts: SubsetCommandOptions) {
     ...(schema && { schema }),
     ...(opts.traversal && { traversal: opts.traversal }),
     ...(opts.strictCycles && { strictCycles: true }),
+    ...(ctx.progress && {
+      onProgress: (event: SubsetProgress) => ctx.progress?.(describeProgress(event)),
+    }),
   };
 }
 
@@ -467,13 +502,22 @@ function printSync(ctx: ProgramContext, result: SyncResult): void {
 /** Runs the CLI, printing errors readably and returning the exit code. */
 export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promise<number> {
   const confirm = terminalConfirm();
+  const spinner = terminalProgress();
   const context: ProgramContext = {
     cwd: process.cwd(),
     userConfig: openUserConfig(),
-    stdout: (s) => process.stdout.write(s),
-    stderr: (s) => process.stderr.write(s),
+    // Anything printed ends the spinner first, so its line never garbles output.
+    stdout: (s) => {
+      spinner?.stop();
+      process.stdout.write(s);
+    },
+    stderr: (s) => {
+      spinner?.stop();
+      process.stderr.write(s);
+    },
     updates: npmUpdateSource(packageName),
     ...(confirm && { confirm }),
+    ...(spinner && { progress: spinner.update }),
     ...ctx,
   };
   // Runs alongside the command, so it only adds time when the command finishes first.
@@ -483,6 +527,7 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
     await createProgram(context).parseAsync(argv, { from: "user" });
     code = 0;
   } catch (e) {
+    spinner?.stop();
     const err = e as { code?: string; exitCode?: number };
     // Commander has already printed its own usage errors.
     if (err.code?.startsWith("commander.")) code = err.exitCode ?? 1;
@@ -491,6 +536,7 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
       code = 1;
     }
   }
+  spinner?.stop();
   const available = await update;
   if (available) {
     context.stderr(
