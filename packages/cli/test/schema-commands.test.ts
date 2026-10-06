@@ -188,23 +188,89 @@ describe("seeds", () => {
     ]);
   });
 
-  test("a -t without its -w is an error", async () => {
+  test("a -t without a -w takes the whole table", async () => {
     const result = await cliWithSource().run(
       "plan",
       "--source",
       "src",
       "-t",
       "parent_table",
+      "--json",
+    );
+
+    expect(result.code).toBe(0);
+    const tables = JSON.parse(result.stdout).tables as { table: string; rows: number }[];
+    expect(tables.find((t) => t.table === "public.parent_table")?.rows).toBe(1); // every row (the fixture has one)
+    expect(result.stderr).toContain("no --where for public.parent_table: taking every row");
+  });
+
+  test("an empty or blank -w also takes the whole table", async () => {
+    for (const where of ["", "   "]) {
+      const result = await cliWithSource().run(
+        "plan",
+        "--source",
+        "src",
+        "-t",
+        "parent_table",
+        "-w",
+        where,
+        "--json",
+      );
+      expect(result.code).toBe(0);
+      expect(planned(result.stdout)).toContain("public.parent_table");
+      expect(result.stderr).toContain("no --where for public.parent_table: taking every row");
+    }
+  });
+
+  test("each -w belongs to the -t written just before it", async () => {
+    const result = await cliWithSource().run(
+      "plan",
+      "--source",
+      "src",
+      "-t",
+      "leaf_table",
+      "-t",
+      "parent_table",
+      "-w",
+      "id = 999",
+      "--json",
+    );
+
+    expect(result.code).toBe(0);
+    // leaf_table: whole table (1 row); parent_table: id = 999 matches nothing
+    expect(planned(result.stdout)).toEqual(["public.leaf_table"]);
+  });
+
+  test("a -w with no -t before it is an error", async () => {
+    const result = await cliWithSource().run(
+      "plan",
+      "--source",
+      "src",
+      "-w",
+      "id = 1",
+      "-t",
+      "leaf_table",
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("--where must come right after the --seed-table it filters");
+  });
+
+  test("two -w for one -t is an error", async () => {
+    const result = await cliWithSource().run(
+      "plan",
+      "--source",
+      "src",
       "-t",
       "leaf_table",
       "-w",
       "true",
+      "-w",
+      "id = 1",
     );
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain(
-      "every --seed-table needs a --where (got 2 --seed-table, 1 --where)",
-    );
+    expect(result.stderr).toContain("public.leaf_table already has a --where");
   });
 
   test("a bare seed table resolves in the schema file's defaultSchema", async () => {
@@ -231,7 +297,7 @@ describe("seeds", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain(
-      "no seed: pass --seed-table <table> --where <sql> (repeat the pair for more)",
+      "no seed: pass --seed-table <table> [--where <sql>] (repeat for more)",
     );
   });
 
@@ -418,4 +484,94 @@ test("plan shows its progress while collecting the subset", async () => {
   expect(result.code).toBe(0);
   expect(progress[0]).toBe("reading the source schema");
   expect(progress.at(-1)).toBe("collecting the subset: 2 rows across 2 tables");
+  expect(result.stdout).toMatch(/"durationMs": [\d.]+/);
+});
+
+test("plan prints how long it took", async () => {
+  const cli = cliWithSource();
+
+  const result = await cli.run("plan", "--source", "src", "-t", "parent_table", "-w", "id = 1");
+
+  expect(result.stdout).toMatch(/total: 2 rows across 2 tables, in [\d.]+m?s\n/);
+});
+
+test("sync shows each step of the load as it goes", async () => {
+  const target = await startPostgres();
+  try {
+    const steps: [string, string | undefined][] = [];
+    const cli = testCli({ progress: (m, step) => steps.push([m, step]) });
+    cli.userConfig.set("connections.src.url", source.url);
+    cli.userConfig.set("connections.dst.url", target.url);
+    cli.userConfig.set("allowlist", "127.0.0.1");
+
+    const result = await cli.run(
+      "sync",
+      "--source",
+      "src",
+      "--target",
+      "dst",
+      "-t",
+      "parent_table",
+      "-w",
+      "id = 1",
+    );
+
+    expect(result.code).toBe(0);
+    // The last message of each step is what stays on screen.
+    const last = new Map(steps.map(([m, step]) => [step, m]));
+    expect([...last.values()]).toEqual([
+      "reading the source schema",
+      "collecting the subset: 2 rows across 2 tables",
+      "checking target tables, creating missing ones",
+      "[1/2] public.parent_table: 1 row copied into a new table",
+      "[2/2] public.child_table: 1 row copied into a new table",
+      "updating planner statistics [2/2]: public.child_table",
+    ]);
+  } finally {
+    await target.close();
+  }
+});
+
+describe("sync output", () => {
+  test("shows how each table was loaded and how many rows were written or unchanged", async () => {
+    const target = await startPostgres();
+    try {
+      const cli = cliWithSource();
+      cli.userConfig.set("connections.dst.url", target.url);
+      cli.userConfig.set("allowlist", "127.0.0.1");
+
+      const first = await cli.run(
+        "sync",
+        "--source",
+        "src",
+        "--target",
+        "dst",
+        "-t",
+        "parent_table",
+        "-w",
+        "id = 1",
+      );
+      expect(first.code).toBe(0);
+      expect(first.stdout).toMatch(/public\.parent_table\s*│\s*new table\s*│\s*1\s*│\s*0/);
+      expect(first.stdout).toMatch(
+        /total: 2 rows written, 0 unchanged across 2 tables, in [\d.]+m?s \(run \w+\)/,
+      );
+
+      const second = await cli.run(
+        "sync",
+        "--source",
+        "src",
+        "--target",
+        "dst",
+        "-t",
+        "parent_table",
+        "-w",
+        "id = 1",
+      );
+      expect(second.stdout).toMatch(/public\.parent_table\s*│\s*upsert\s*│\s*0\s*│\s*1/);
+      expect(second.stdout).toContain("total: 0 rows written, 2 unchanged");
+    } finally {
+      await target.close();
+    }
+  });
 });

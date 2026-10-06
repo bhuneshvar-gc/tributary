@@ -1,5 +1,6 @@
 export * from "./catalog.js";
 export * from "./closure.js";
+export * from "./copy.js";
 export * from "./db.js";
 export * from "./ddl.js";
 export * from "./graph.js";

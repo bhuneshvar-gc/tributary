@@ -20,11 +20,36 @@ export interface SubsetOptions {
   onProgress?: (event: SubsetProgress) => void;
 }
 
+/** Where a table is in a sync's load: its position among the tables loaded. */
+interface TableStep {
+  table: NodeId;
+  /** 1-based. */
+  index: number;
+  total: number;
+}
+
 /** What a plan or sync is doing right now. */
 export type SubsetProgress =
   | { phase: "inspecting" }
   | { phase: "collecting"; rows: number; tables: number }
-  | { phase: "loading"; table: NodeId; index: number; total: number };
+  /** Checking the target's tables, creating missing ones. */
+  | { phase: "preparing" }
+  /** --fresh: deleting the subset's rows from the target. */
+  | { phase: "deleting"; tables: number }
+  /** Streaming a table's rows from source to target: `rows` so far, of `totalRows`. */
+  | ({ phase: "copying"; rows: number; totalRows: number } & TableStep)
+  /** Merging a table's staged rows into it. */
+  | ({ phase: "merging"; rows: number } & TableStep)
+  | ({
+      phase: "loaded";
+      mode: "new table" | "upsert";
+      written: number;
+      unchanged: number;
+    } & TableStep)
+  /** Restoring the deferred foreign keys of a table. */
+  | ({ phase: "backfilling" } & TableStep)
+  /** Refreshing planner statistics of a table that changed. */
+  | ({ phase: "analyzing" } & TableStep);
 
 export interface PlanOptions extends SubsetOptions {
   /** Source connection string. */
@@ -91,10 +116,13 @@ export interface PlanResult {
   totalRows: number;
   breaks: AppliedBreak[];
   warnings: string[];
+  /** Wall-clock time the plan took. */
+  durationMs: number;
 }
 
 /** Computes the subset without writing anything: per-table row counts in load order. */
 export async function plan(options: PlanOptions): Promise<PlanResult> {
+  const started = performance.now();
   const source = await connect(options.source);
   try {
     const { graph, closure, order } = await readOnly(source, () =>
@@ -115,6 +143,7 @@ export async function plan(options: PlanOptions): Promise<PlanResult> {
       totalRows: tables.reduce((n, t) => n + t.rows, 0),
       breaks: closure.breaks,
       warnings: closure.warnings,
+      durationMs: performance.now() - started,
     };
   } finally {
     await source.end();

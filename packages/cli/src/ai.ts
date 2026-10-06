@@ -82,7 +82,8 @@ export function buildSystemPrompt(options: { canSync?: boolean } = {}): string {
     "- list_schemas(): every schema with its table count.",
     "- Many schemas can hold identical copies of a table (one per tenant). If the user names a",
     "  tenant or schema, use that schema; otherwise ask for it in warnings and pick the likeliest.",
-    "- Use as few lookups as you need, usually one search and one or two describes.",
+    "- search_tables includes the columns of its top matches; often that's enough to submit.",
+    "  Use describe_table only when you need a table's keys or types. Keep lookups few.",
     "",
     "Rules:",
     '- plan and sync need seedTable and where. where is a raw SQL WHERE fragment, e.g. "id = 42".',
@@ -121,8 +122,42 @@ export function createModel(ai: UserConfig["ai"] = {}): LanguageModel {
 /** Default for ai.maxPromptTokens: input tokens one `tributary ai` request may use in total. */
 export const DEFAULT_MAX_PROMPT_TOKENS = 20_000;
 
+/** Time limits: a whole request, and any single model call within it. */
+const DEFAULT_TIMEOUT_MS = 180_000;
+const STEP_TIMEOUT_MS = 60_000;
+
+/** What one finished step did. */
+export interface StepReport {
+  step: number;
+  /** Tools the model called in this step. */
+  tools: string[];
+  inputTokens: number;
+}
+
+class TimeoutReached extends Error {
+  override name = "TimeoutError";
+}
+
+function isTimeout(e: unknown): boolean {
+  for (let cur = e; cur instanceof Error; cur = cur.cause) {
+    if (
+      cur.name === "TimeoutError" ||
+      cur.name === "AbortError" ||
+      /timed? ?out|aborted/i.test(cur.message)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** At most this many model calls (lookups plus the answer) per request. */
 const MAX_STEPS = 8;
+
+function withoutReasoning(message: ModelMessage): ModelMessage {
+  if (message.role !== "assistant" || typeof message.content === "string") return message;
+  return { ...message, content: message.content.filter((part) => part.type !== "reasoning") };
+}
 
 /** One earlier round: what was asked and the command it produced. */
 export interface Turn {
@@ -165,6 +200,10 @@ export async function generateCommand(
     maxPromptTokens?: number;
     /** Earlier rounds of this conversation, oldest first, for a follow-up request. */
     history?: Turn[];
+    /** The whole request's time limit (default 3 minutes; each model call also gets at most 1). */
+    timeoutMs?: number;
+    /** Called as each step finishes, e.g. to show progress. */
+    onStep?: (step: StepReport) => void;
   } = {},
 ): Promise<GeneratedCommand> {
   const cap = options.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
@@ -172,8 +211,21 @@ export async function generateCommand(
   const inputTokens = (steps: { usage: { inputTokens?: number | undefined } }[]) =>
     steps.reduce((n, s) => n + (s.usage.inputTokens ?? 0), 0);
 
+  const totalMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let submitted: AiCommand | undefined;
-  const result = await generateText({
+  let stepNumber = 0;
+  // A hard deadline of our own: the SDK's timeout cancels the request, but a
+  // provider that ignores cancellation (or the SDK retrying) could otherwise
+  // keep the command waiting long past the limit.
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new TimeoutReached());
+    }, totalMs);
+  });
+  const generation = generateText({
     model,
     system: buildSystemPrompt(options),
     messages: conversation(options.history ?? [], request),
@@ -211,13 +263,37 @@ export async function generateCommand(
     // Every step is a tool call, so the model can't answer before looking
     // anything up; it finishes by submitting a valid command.
     toolChoice: "required",
+    // Re-sending the model's earlier reasoning would grow every step's input
+    // (reasoning models write thousands of tokens per step); the lookups and
+    // their results are all it needs to continue.
+    prepareStep: ({ messages }) => ({ messages: messages.map(withoutReasoning) }),
     stopWhen: [
       () => submitted !== undefined,
       stepCountIs(MAX_STEPS),
       ({ steps }) => inputTokens(steps) >= cap,
     ],
     maxRetries: 3,
+    abortSignal: controller.signal,
+    timeout: { totalMs, stepMs: Math.min(STEP_TIMEOUT_MS, totalMs) },
+    onStepFinish: (step) => {
+      options.onStep?.({
+        step: ++stepNumber,
+        tools: step.toolCalls.map((c) => c.toolName),
+        inputTokens: step.usage.inputTokens ?? 0,
+      });
+    },
   });
+  generation.catch(() => {}); // abandoned after the deadline; never an unhandled rejection
+  const result = await Promise.race([generation, deadline])
+    .finally(() => clearTimeout(timer))
+    .catch((e: unknown) => {
+      throw isTimeout(e)
+        ? new Error(
+            `the model didn't finish within ${totalMs / 1000}s; it may be overloaded or too slow for this, try a faster model (tributary config set ai.model <id>)`,
+            { cause: e },
+          )
+        : e;
+    });
 
   const usage = {
     inputTokens: result.totalUsage.inputTokens ?? 0,

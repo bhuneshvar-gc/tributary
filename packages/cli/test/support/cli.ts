@@ -37,7 +37,7 @@ export interface TestCliOptions {
   terminal?: Terminal;
   /** Stands in for the npm registry (offline by default). */
   updates?: UpdateSource;
-  progress?: (message: string) => void;
+  progress?: (message: string, step?: string) => void;
   /** Stands in for the configured AI model. */
   model?: LanguageModel;
 }

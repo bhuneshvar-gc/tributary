@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { parse } from "pg-connection-string";
-import type { Queryable, Row } from "./db.js";
+import type { Queryable } from "./db.js";
 import type { Seed } from "./model.js";
 import type { SubsetOptions } from "./plan.js";
 
 /**
- * Sync checkpoints, kept in the target database's `_tributary` schema so
- * a resume works from any machine, and so a table's checkpoint commits in
- * the same transaction as its rows.
+ * A log of sync runs, kept in the target database's `_tributary` schema:
+ * when each ran and how it ended. There are no per-table checkpoints: a
+ * re-run after a failure streams every table again, and the merge writes
+ * nothing for rows that are already there and unchanged.
  */
 export const STATE_SCHEMA = "_tributary";
 
@@ -48,16 +49,6 @@ function canonical(items: { at?: string }[]): string[] {
   return items.map(({ at: _, ...meaning }) => JSON.stringify(meaning)).sort();
 }
 
-/**
- * A fingerprint of the rows a table is about to receive. A resumed run
- * only skips a table whose checkpoint has the same fingerprint, so source
- * changes since the interrupted run are never silently left out.
- */
-export function rowsFingerprint(rows: ReadonlyMap<string, Row>): string {
-  const keys = [...rows.keys()].sort();
-  return sha256(...keys.map((k) => JSON.stringify([k, rows.get(k)])));
-}
-
 export async function ensureStateSchema(db: Queryable): Promise<void> {
   await db.query(`
     CREATE SCHEMA IF NOT EXISTS ${STATE_SCHEMA};
@@ -68,63 +59,17 @@ export async function ensureStateSchema(db: Queryable): Promise<void> {
       created_at     timestamptz NOT NULL DEFAULT now(),
       completed_at   timestamptz
     );
-    CREATE TABLE IF NOT EXISTS ${STATE_SCHEMA}.run_tables (
-      run_id           text NOT NULL REFERENCES ${STATE_SCHEMA}.runs ON DELETE CASCADE,
-      table_name       text NOT NULL,
-      rows_fingerprint text NOT NULL,
-      rows_upserted    bigint NOT NULL,
-      completed_at     timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY (run_id, table_name)
-    );`);
+    -- Per-table checkpoints from versions before 0.2.
+    DROP TABLE IF EXISTS ${STATE_SCHEMA}.run_tables;`);
 }
 
-/**
- * Starts or resumes run `id`. An unfinished run (in progress or failed)
- * resumes, keeping its table checkpoints, unless `fresh`; a completed or
- * fresh run starts over.
- */
-export async function startRun(db: Queryable, id: string, fresh: boolean): Promise<void> {
-  const { rows } = await db.query(`SELECT status FROM ${STATE_SCHEMA}.runs WHERE run_id = $1`, [
-    id,
-  ]);
-  const status = rows[0]?.status as RunStatus | undefined;
-  if (status === undefined) {
-    await db.query(`INSERT INTO ${STATE_SCHEMA}.runs (run_id, status) VALUES ($1, 'in_progress')`, [
-      id,
-    ]);
-    return;
-  }
-  if (status === "completed" || fresh) {
-    await db.query(`DELETE FROM ${STATE_SCHEMA}.run_tables WHERE run_id = $1`, [id]);
-  }
+/** Records run `id` as in progress (a re-run of the same sync reuses its id). */
+export async function startRun(db: Queryable, id: string): Promise<void> {
   await db.query(
-    `UPDATE ${STATE_SCHEMA}.runs SET status = 'in_progress', failure_reason = NULL, completed_at = NULL WHERE run_id = $1`,
+    `INSERT INTO ${STATE_SCHEMA}.runs (run_id, status) VALUES ($1, 'in_progress')
+     ON CONFLICT (run_id) DO UPDATE SET status = 'in_progress', failure_reason = NULL,
+       created_at = now(), completed_at = NULL`,
     [id],
-  );
-}
-
-/** Table -> fingerprint of the rows it was loaded with, for this run's completed tables. */
-export async function completedTables(db: Queryable, id: string): Promise<Map<string, string>> {
-  const { rows } = await db.query(
-    `SELECT table_name, rows_fingerprint FROM ${STATE_SCHEMA}.run_tables WHERE run_id = $1`,
-    [id],
-  );
-  return new Map(rows.map((r) => [r.table_name!, r.rows_fingerprint!]));
-}
-
-/** Call inside the table's load transaction. */
-export async function markTableDone(
-  db: Queryable,
-  id: string,
-  table: string,
-  fingerprint: string,
-  rowsUpserted: number,
-): Promise<void> {
-  await db.query(
-    `INSERT INTO ${STATE_SCHEMA}.run_tables (run_id, table_name, rows_fingerprint, rows_upserted) VALUES ($1, $2, $3, $4)
-     ON CONFLICT (run_id, table_name) DO UPDATE SET rows_fingerprint = EXCLUDED.rows_fingerprint,
-       rows_upserted = EXCLUDED.rows_upserted, completed_at = now()`,
-    [id, table, fingerprint, rowsUpserted],
   );
 }
 

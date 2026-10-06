@@ -130,7 +130,7 @@ test("a composite foreign key pairs its columns correctly", async () => {
 
   const closure = await closureOf("composite_child_table", "id = 1");
   const parents = [...closure.rows.get("public.composite_parent_table")!.values()];
-  expect(parents.map((r) => r.name)).toEqual(["tenant2-5"]);
+  expect(parents).toEqual([{ tenant_id: "2", id: "5" }]); // tenant 2's parent 5, not tenant 1's
   expect(ids(closure)["public.tenant_table"]).toEqual(["2"]);
 });
 
@@ -246,6 +246,16 @@ describe("round trips", () => {
     expect(queries.length).toBeLessThanOrEqual(4);
   });
 
+  test("a lookup returning hundreds of thousands of rows doesn't overflow the stack", async () => {
+    await db.source.exec(`
+      insert into parent_table values (1, 'p1');
+      insert into child_table select g, 1, 'c' from generate_series(1, 200000) g;`);
+
+    const { closure } = await counted([{ table: "public.parent_table", where: "id = 1" }]);
+
+    expect(closure.rows.get("public.child_table")?.size).toBe(200_000);
+  }, 120_000);
+
   test("a parent shared by many rows is fetched once", async () => {
     await db.source.exec(`
       insert into parent_table values (1, 'p1');
@@ -282,9 +292,9 @@ describe("round trips", () => {
     ]);
 
     const parents = [...closure.rows.get("public.composite_parent_table")!.values()]
-      .map((r) => r.name)
+      .map((r) => `${r.tenant_id}/${r.id}`)
       .sort();
-    expect(parents).toEqual(["t1-6", "t2"]);
+    expect(parents).toEqual(["1/6", "2/5"]);
     expect(queries.filter((q) => /FROM public\.composite_parent_table\b/.test(q))).toHaveLength(1);
   });
 });
@@ -305,4 +315,18 @@ test("progress is reported as rows are collected", async () => {
   }
   expect(reports.at(-1)).toEqual({ rows: 3, tables: 2 });
   expect(reports.length).toBeGreaterThan(1);
+});
+
+test("the closure keeps only the columns needed to follow relations, not whole rows", async () => {
+  await db.source.exec(`
+    insert into parent_table values (1, 'p1');
+    insert into child_table values (10, 1, 'c10');`);
+
+  const closure = await closureOf("parent_table", "id = 1");
+
+  // child_table: its key and the foreign key column; "name" stays in the database.
+  expect([...closure.rows.get("public.child_table")!.values()]).toEqual([
+    { id: "10", parent_id: "1" },
+  ]);
+  expect([...closure.rows.get("public.parent_table")!.values()]).toEqual([{ id: "1" }]);
 });

@@ -90,51 +90,52 @@ function keyedValues(
 }
 
 /**
- * Upserts rows into `table` keyed on its primary key: an existing target
- * row is updated to match the source, a new one inserted. Values travel as
- * Postgres text and are parsed by the target's input functions. Deferred
- * columns are written NULL (on insert and update alike) for backfill.
+ * Merges rows staged in `staging` (same columns as `t`) into `t`, keyed on
+ * its primary key: new rows are inserted; an existing row is updated only
+ * where some column actually differs, so an unchanged row costs no write
+ * (no new row version, no WAL for its data). Deferred columns are left to
+ * backfill: inserted as staged (NULL) and never overwritten by the merge.
+ * Columns are compared as text, the exact form the rows were copied in:
+ * that works for types with no `=` (json, point, xml) and catches changes
+ * `=` calls equal (numeric 1.0 vs 1.00, citext case).
  * Returns the number of rows inserted or updated.
  */
-export async function upsertRows(
+export async function mergeStaged(
   db: Queryable,
   t: Table,
-  rows: Row[],
+  staging: string,
   deferred: ReadonlySet<string> = new Set(),
 ): Promise<number> {
   const columns = t.columns.map((c) => c.name);
   const pk = new Set(t.primaryKey);
-  const nonKey = columns.filter((c) => !pk.has(c));
-  // A key-only table still does a (no-op) update, so existing rows count as upserted.
-  const updated = nonKey.length ? nonKey : t.primaryKey.slice(0, 1);
-  const set = updated.map((c) => `${ident(c)} = EXCLUDED.${ident(c)}`).join(", ");
-  let upserted = 0;
-  for (const batch of chunk(rows, columns.length)) {
-    const params: (string | null)[] = [];
-    const tuples = batch.map(
-      (row) =>
-        `(${columns.map((c) => `$${params.push(deferred.has(c) ? null : (row[c] ?? null))}`).join(", ")})`,
-    );
-    const result = await db.query(
-      `INSERT INTO ${qualified(tableId(t))} (${columns.map(ident).join(", ")}) VALUES ${tuples.join(", ")}
-       ON CONFLICT (${t.primaryKey.map(ident).join(", ")}) DO UPDATE SET ${set}`,
-      params,
-    );
-    upserted += result.rowCount ?? 0;
-  }
-  return upserted;
+  const compared = columns.filter((c) => !pk.has(c) && !deferred.has(c));
+  const list = columns.map(ident).join(", ");
+  const target = qualified(tableId(t));
+  const onConflict = compared.length
+    ? `DO UPDATE SET ${compared.map((c) => `${ident(c)} = EXCLUDED.${ident(c)}`).join(", ")}
+       WHERE (${compared.map((c) => `${target}.${ident(c)}::text`).join(", ")}) IS DISTINCT FROM (${compared.map((c) => `EXCLUDED.${ident(c)}::text`).join(", ")})`
+    : "DO NOTHING";
+  const result = await db.query(
+    `INSERT INTO ${target} (${list}) SELECT ${list} FROM ${staging}
+     ON CONFLICT (${t.primaryKey.map(ident).join(", ")}) ${onConflict}`,
+  );
+  return result.rowCount ?? 0;
 }
 
 export interface BackfillResult {
+  /** Rows whose reference was restored (set to a non-NULL value). */
   backfilled: number;
   /** Rows whose referenced row is outside the subset, so the column stays NULL. */
   leftNull: number;
 }
 
 /**
- * Restores deferred FK values, but only where the referenced row is in
- * the subset; the rest stay NULL, the documented behavior at a subset
- * boundary.
+ * Sets each deferred FK on the subset's rows to its source value where the
+ * referenced row is in the subset, and to NULL where it isn't (the
+ * documented behavior at a subset boundary). Every row is covered, not
+ * only the ones loaded NULL: the merge never touches deferred columns, so
+ * this is what brings a re-synced row's reference up to date. Only rows
+ * whose value differs are written.
  */
 export async function backfill(
   db: Queryable,
@@ -149,23 +150,32 @@ export async function backfill(
     const present = new Set([...parents].map((p) => valuesKey(fk.toColumns, p)));
     const restore: (string | null)[][] = [];
     for (const row of rows) {
-      if (fk.fromColumns.some((c) => row[c] == null)) continue;
-      if (!present.has(valuesKey(fk.fromColumns, row))) {
-        result.leftNull++;
-        continue;
-      }
-      restore.push([...t.primaryKey, ...fk.fromColumns].map((c) => row[c] ?? null));
+      // A reference with a NULL column isn't checked (MATCH SIMPLE): kept as is.
+      const outside =
+        fk.fromColumns.every((c) => row[c] != null) && !present.has(valuesKey(fk.fromColumns, row));
+      if (outside) result.leftNull++;
+      restore.push([
+        ...t.primaryKey.map((c) => row[c] ?? null),
+        ...fk.fromColumns.map((c) => (outside ? null : (row[c] ?? null))),
+      ]);
     }
     for (const batch of chunk(restore, t.primaryKey.length + fk.fromColumns.length)) {
       const v = keyedValues(t, t.primaryKey, fk.fromColumns, batch);
       const set = fk.fromColumns
         .map((c, i) => `${ident(c)} = v.v${t.primaryKey.length + i}`)
         .join(", ");
+      const values = fk.fromColumns.map((_, i) => `v.v${t.primaryKey.length + i}`).join(", ");
+      // Only rows whose value differs are written, so an unchanged re-sync backfills nothing.
+      const differs = `(${fk.fromColumns.map((c) => `t.${ident(c)}`).join(", ")}) IS DISTINCT FROM (${values})`;
+      // Rows set to NULL are written too, but only restored references count.
       const updated = await db.query(
-        `UPDATE ${qualified(tableId(t))} AS t SET ${set} FROM ${v.from} WHERE ${v.on}`,
+        `WITH u AS (
+           UPDATE ${qualified(tableId(t))} AS t SET ${set} FROM ${v.from} WHERE ${v.on} AND ${differs}
+           RETURNING num_nonnulls(${values}) > 0 AS restored
+         ) SELECT count(*) FILTER (WHERE restored) AS restored FROM u`,
         v.params,
       );
-      result.backfilled += updated.rowCount ?? 0;
+      result.backfilled += Number(updated.rows[0]?.restored ?? 0);
     }
   }
   return result;

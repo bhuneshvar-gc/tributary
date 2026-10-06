@@ -32,6 +32,7 @@ import {
   type Turn,
   toCliArgs,
 } from "./ai.js";
+import { describeProgress, formatDuration, liveProgress } from "./progress.js";
 import { findSchemaFile, loadRunSchema, relabel } from "./schema-file.js";
 import {
   type AvailableUpdate,
@@ -69,40 +70,14 @@ export interface ProgramContext {
   model?: (ai: UserConfig["ai"]) => LanguageModel;
   /** Where new versions are looked up and installed from. */
   updates: UpdateSource;
-  /** Shows what a long command is doing; absent when stderr isn't a terminal. */
-  progress?: (message: string) => void;
+  /**
+   * Shows what a long command is doing; absent when stderr isn't a
+   * terminal. Messages with the same `step` update one line; a new step
+   * closes the previous one as done (default: each message is its own step).
+   */
+  progress?: (message: string, step?: string) => void;
 }
 
-/** A spinner on stderr whose text follows the work, started on first use. */
-function terminalProgress() {
-  if (!process.stderr.isTTY) return undefined;
-  let spinner: ReturnType<typeof p.spinner> | undefined;
-  return {
-    update(message: string) {
-      if (!spinner) {
-        spinner = p.spinner({ output: process.stderr });
-        spinner.start(message);
-      } else spinner.message(message);
-    },
-    stop() {
-      spinner?.stop();
-      spinner = undefined;
-    },
-  };
-}
-
-function describeProgress(event: SubsetProgress): string {
-  switch (event.phase) {
-    case "inspecting":
-      return "reading the source schema";
-    case "collecting":
-      return `collecting the subset: ${event.rows.toLocaleString("en-US")} rows across ${event.tables} tables`;
-    case "loading":
-      return `loading ${event.table} (${event.index}/${event.total})`;
-  }
-}
-
-/** A y/N prompt on the terminal, or undefined when stdin/stderr aren't one. */
 /** Yes/no, menu and text prompts on the terminal, or undefined when stdin/stderr aren't one. */
 function terminalPrompts(): Pick<ProgramContext, "confirm" | "choose" | "ask"> | undefined {
   if (!process.stdin.isTTY || !process.stderr.isTTY) return undefined;
@@ -125,8 +100,6 @@ function terminalPrompts(): Pick<ProgramContext, "confirm" | "choose" | "ask"> |
 interface SubsetCommandOptions {
   source: string;
   schema?: string;
-  seedTable: string[];
-  where: string[];
   traversal?: Traversal;
   strictCycles?: boolean;
   json?: boolean;
@@ -138,7 +111,14 @@ interface SyncCommandOptions extends SubsetCommandOptions {
   createSchema: boolean;
 }
 
-const collect = (value: string, previous: string[]) => [...previous, value];
+/** One --seed-table and the --where values written right after it, in command-line order. */
+interface SeedFlag {
+  table?: string;
+  where: string[];
+}
+
+/** Each subset command's seed flags, recorded in order as commander parses them. */
+const seedFlagsOf = new WeakMap<Command, SeedFlag[]>();
 
 /** --source; required unless `optional` describes what it's for. */
 function sourceOption(optional?: string): Option {
@@ -162,20 +142,30 @@ function inspectSource(ctx: ProgramContext, name: string) {
 }
 
 function subsetOptions(cmd: Command): Command {
+  // -t and -w are recorded in one list, so each -w belongs to the -t
+  // written just before it, and a -t without one takes the whole table.
+  const flags: SeedFlag[] = [];
+  seedFlagsOf.set(cmd, flags);
   return cmd
     .addOption(sourceOption())
     .addOption(schemaOption())
     .option(
       "-t, --seed-table <table>",
-      'seed table, e.g. "users" or "billing.invoices" (repeatable)',
-      collect,
-      [],
+      'seed table, e.g. "users" or "billing.invoices" (repeatable; no --where = every row)',
+      (table: string) => {
+        flags.push({ table, where: [] });
+        return table;
+      },
     )
     .option(
       "-w, --where <sql>",
-      'WHERE fragment for the matching --seed-table, e.g. "id = 42"',
-      collect,
-      [],
+      'WHERE fragment for the --seed-table just before it, e.g. "id = 42"',
+      (where: string) => {
+        const last = flags.at(-1);
+        if (last) last.where.push(where);
+        else flags.push({ where: [where] });
+        return where;
+      },
     )
     .addOption(
       new Option(
@@ -188,40 +178,54 @@ function subsetOptions(cmd: Command): Command {
 }
 
 /**
- * Pairs each --seed-table with the --where in the same position. Bare
- * table names resolve in the schema file's defaultSchema, as in the file.
+ * The seeds from the command line, in order. Each --where filters the
+ * --seed-table just before it; a --seed-table without one takes every
+ * row. Bare table names resolve in the schema file's defaultSchema, as in
+ * the file.
  */
-function seeds(
-  opts: Pick<SubsetCommandOptions, "seedTable" | "where">,
-  defaultSchema: string,
-): Seed[] {
-  const { seedTable: tables, where } = opts;
-  if (tables.length !== where.length) {
-    throw new Error(
-      `every --seed-table needs a --where (got ${tables.length} --seed-table, ${where.length} --where)`,
-    );
+/** The flag's --where, or undefined when it's missing or blank (every row). */
+function givenWhere(flag: SeedFlag): string | undefined {
+  const where = flag.where[0];
+  return where?.trim() ? where : undefined;
+}
+
+function seeds(flags: SeedFlag[], defaultSchema: string): Seed[] {
+  if (flags.length === 0) {
+    throw new Error("no seed: pass --seed-table <table> [--where <sql>] (repeat for more)");
   }
-  if (tables.length === 0)
-    throw new Error("no seed: pass --seed-table <table> --where <sql> (repeat the pair for more)");
-  return tables.map((table, i) => ({
-    table: qualifyTable(table, defaultSchema),
-    where: where[i]!,
-  }));
+  return flags.map((flag) => {
+    if (flag.table === undefined) {
+      throw new Error("--where must come right after the --seed-table it filters");
+    }
+    const table = qualifyTable(flag.table, defaultSchema);
+    if (flag.where.length > 1) {
+      throw new Error(`${table} already has a --where; combine them with AND in one --where`);
+    }
+    return { table, where: givenWhere(flag) ?? "true" };
+  });
 }
 
 /** Everything a plan or sync needs from the command line, resolved. */
-async function subset(ctx: ProgramContext, opts: SubsetCommandOptions) {
+async function subset(ctx: ProgramContext, opts: SubsetCommandOptions, cmd: Command) {
   const source = ctx.userConfig.connectionUrl(opts.source);
-  seeds(opts, "public"); // usage errors before any file or database work
+  const flags = seedFlagsOf.get(cmd) ?? [];
+  seeds(flags, "public"); // usage errors before any file or database work
   const schema = await loadRunSchema(ctx.cwd, opts.schema, (m) => ctx.stderr(`${pc.dim(m)}\n`));
+  const seedList = seeds(flags, schema?.defaultSchema ?? "public");
+  for (const seed of seedList.filter((_, i) => givenWhere(flags[i]!) === undefined)) {
+    ctx.stderr(`${pc.dim(`no --where for ${seed.table}: taking every row`)}\n`);
+  }
   return {
     source,
-    seeds: seeds(opts, schema?.defaultSchema ?? "public"),
+    seeds: seedList,
     ...(schema && { schema }),
     ...(opts.traversal && { traversal: opts.traversal }),
     ...(opts.strictCycles && { strictCycles: true }),
     ...(ctx.progress && {
-      onProgress: (event: SubsetProgress) => ctx.progress?.(describeProgress(event)),
+      onProgress: (event: SubsetProgress) => {
+        const { text, step } = describeProgress(event);
+        ctx.progress?.(text, step);
+      },
     }),
   };
 }
@@ -257,21 +261,18 @@ export function createProgram(ctx: ProgramContext): Command {
 
   subsetOptions(program.command("plan"))
     .description("compute the subset and report row counts per table, writing nothing")
-    .action(async (opts: SubsetCommandOptions) => {
-      output(ctx, opts.json, await plan(await subset(ctx, opts)), (r) => printPlan(ctx, r));
+    .action(async (opts: SubsetCommandOptions, cmd: Command) => {
+      output(ctx, opts.json, await plan(await subset(ctx, opts, cmd)), (r) => printPlan(ctx, r));
     });
 
   subsetOptions(program.command("sync"))
     .description("copy the subset from source into target (upserting; safe to re-run)")
     .requiredOption("-T, --target <name>", "target connection name")
-    .option(
-      "--fresh",
-      "delete the subset's rows from target first, and don't resume an earlier run",
-    )
+    .option("--fresh", "delete the subset's rows from target before loading them")
     .option("--no-create-schema", "fail instead of creating missing target tables")
-    .action(async (opts: SyncCommandOptions) => {
+    .action(async (opts: SyncCommandOptions, cmd: Command) => {
       const result = await sync({
-        ...(await subset(ctx, opts)),
+        ...(await subset(ctx, opts, cmd)),
         target: ctx.userConfig.connectionUrl(opts.target),
         allowlist: ctx.userConfig.allowlist(),
         fresh: opts.fresh ?? false,
@@ -440,10 +441,15 @@ function addAiCommand(ctx: ProgramContext, program: Command): void {
 
         // Generate, show, then run / follow up / cancel, until run or cancel.
         for (;;) {
-          ctx.progress?.("asking the model");
+          ctx.progress?.("asking the model", "ask");
           const { command, usage } = await generateCommand(model, request, db, {
             canSync: opts.target !== undefined,
             history,
+            onStep: ({ step, tools }) =>
+              ctx.progress?.(
+                `asking the model: step ${step} done (${tools.join(", ") || "no tool"})`,
+                "ask",
+              ),
             ...(ai?.maxPromptTokens && { maxPromptTokens: ai.maxPromptTokens }),
           });
           const args = toCliArgs(command, opts);
@@ -548,27 +554,29 @@ function printPlan(ctx: ProgramContext, result: PlanResult): void {
     t.push([row.table, String(row.rows), row.via + note]);
   }
   ctx.stdout(
-    `${t.toString()}\n\ntotal: ${result.totalRows} rows across ${result.tables.length} tables\n`,
+    `${t.toString()}\n\ntotal: ${result.totalRows.toLocaleString("en-US")} rows across ${result.tables.length} tables, in ${formatDuration(result.durationMs)}\n`,
   );
   printWarnings(ctx, result.warnings);
 }
 
 function printSync(ctx: ProgramContext, result: SyncResult): void {
-  const t = cliTable(["table", "upserted", "backfilled", "left null", "status"]);
+  const t = cliTable(["table", "loaded as", "written", "unchanged", "backfilled", "left null"]);
   for (const row of result.tables) {
     t.push([
       row.table,
-      String(row.rowsUpserted),
+      row.mode,
+      String(row.rowsWritten),
+      row.rowsUnchanged ? pc.dim(String(row.rowsUnchanged)) : "0",
       String(row.rowsBackfilled),
       String(row.rowsLeftNull),
-      row.resumed ? pc.dim("already loaded (resumed)") : pc.green("loaded"),
     ]);
   }
   const created = result.schema.tablesCreated.length
     ? `created ${result.schema.tablesCreated.length} table(s) on target: ${result.schema.tablesCreated.join(", ")}\n`
     : "";
+  const unchanged = result.tables.reduce((n, r) => n + r.rowsUnchanged, 0);
   ctx.stdout(
-    `${t.toString()}\n\n${created}total: ${result.totalRows} rows upserted across ${result.tables.length} tables (run ${result.runId})\n`,
+    `${t.toString()}\n\n${created}total: ${result.totalRows.toLocaleString("en-US")} rows written, ${unchanged.toLocaleString("en-US")} unchanged across ${result.tables.length} tables, in ${formatDuration(result.durationMs)} (run ${result.runId})\n`,
   );
   printWarnings(ctx, result.warnings);
 }
@@ -576,22 +584,22 @@ function printSync(ctx: ProgramContext, result: SyncResult): void {
 /** Runs the CLI, printing errors readably and returning the exit code. */
 export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promise<number> {
   const prompts = terminalPrompts();
-  const spinner = terminalProgress();
+  const live = process.stderr.isTTY ? liveProgress(process.stderr) : undefined;
   const context: ProgramContext = {
     cwd: process.cwd(),
     userConfig: openUserConfig(),
-    // Anything printed ends the spinner first, so its line never garbles output.
+    // Anything printed closes the step in progress first, so its live line never garbles output.
     stdout: (s) => {
-      spinner?.stop();
+      live?.finish();
       process.stdout.write(s);
     },
     stderr: (s) => {
-      spinner?.stop();
+      live?.finish();
       process.stderr.write(s);
     },
     updates: npmUpdateSource(packageName),
     ...prompts,
-    ...(spinner && { progress: spinner.update }),
+    ...(live && { progress: live.update }),
     ...ctx,
   };
   // Runs alongside the command, so it only adds time when the command finishes first.
@@ -601,7 +609,7 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
     await createProgram(context).parseAsync(argv, { from: "user" });
     code = 0;
   } catch (e) {
-    spinner?.stop();
+    live?.fail();
     const err = e as { code?: string; exitCode?: number };
     // Commander has already printed its own usage errors.
     if (err.code?.startsWith("commander.")) code = err.exitCode ?? 1;
@@ -610,7 +618,7 @@ export async function run(argv: string[], ctx?: Partial<ProgramContext>): Promis
       code = 1;
     }
   }
-  spinner?.stop();
+  live?.finish();
   const available = await update;
   if (available) {
     context.stderr(

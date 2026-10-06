@@ -35,7 +35,7 @@ users, so there is no compatibility contract.
 | Modules               | ESM-only, TS `strict`                                                      |
 | Package manager       | pnpm workspaces                                                            |
 | Library build         | `tsc` (TypeScript 6)                                                       |
-| Tests                 | vitest + PGlite over `pglite-socket` (real Postgres in-process, no Docker) |
+| Tests                 | vitest + a throwaway real Postgres per test run (initdb/pg_ctl), no Docker |
 | Lint / format         | Biome                                                                      |
 | CLI framework         | commander                                                                  |
 | Config parsing        | zod                                                                        |
@@ -90,14 +90,12 @@ users, so there is no compatibility contract.
    repeatable `-t/--seed-table` + `-w/--where` pairs, `--traversal`,
    `--strict-cycles`, `--fresh`, `--no-create-schema`, `--json`.
 
-### Checkpoints / resume
+### Run log
 
-- State lives in a fixed `_tributary` schema in the **target** database,
-  created on the first sync.
-- Per-table progress is written in the same transaction as that table's
-  merge, so the checkpoint can't drift from the data.
-- `--fresh` resets the state rows for the run's tables, along with a
-  row-scoped delete-then-reload.
+- A fixed `_tributary` schema in the **target** database logs each run
+  (`runs`: status, failure reason, times). There are no per-table
+  checkpoints; see "Streamed COPY load" below for why re-running is cheap.
+- `--fresh` does a row-scoped delete-then-reload.
 - No SQLite dependency.
 
 ### Production-safety guards (enforced in code, not just documented)
@@ -120,9 +118,11 @@ users, so there is no compatibility contract.
   API, not copied verbatim. Covered areas: closure (incl. downstream-only
   default), declared relations, load/upsert, DDL/schema auto-create (incl.
   enums), AI prompt/parser, version handling.
-- Integration tests run against PGlite (real Postgres compiled to WASM)
-  exposed over the wire protocol, two instances per test, using
-  production-shaped fixtures (enums, composite PKs, declared relations).
+- Integration tests run against a throwaway real Postgres cluster started
+  once per test run (`initdb` + `pg_ctl`, durability off), with fresh
+  databases per test, using production-shaped fixtures (enums, composite
+  PKs, declared relations). PGlite was dropped: its socket server can't
+  carry COPY.
 
 ### Release
 
@@ -140,7 +140,7 @@ users, so there is no compatibility contract.
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | 0   | Schema introspection (`tributary inspect`)                                                                                                                                  | done   |
 | 1   | FK graph & subset closure incl. declared relations (`tributary plan`)                                                                                                       | done   |
-| 2   | One-shot export + load: batched `INSERT … ON CONFLICT DO UPDATE` upsert, schema auto-create (columns, types, NOT NULL, PK, FK, enums), resume, `--fresh` (`tributary sync`) | done   |
+| 2   | One-shot export + load: streamed COPY with a skip-unchanged merge, schema auto-create (columns, types, NOT NULL, PK, FK and the unique keys FKs reference, enums), `--fresh` (`tributary sync`) | done   |
 | —   | Natural-language interface (`tributary ai`)                                                                                                                                 | done   |
 | 3   | Masking & transform pipeline                                                                                                                                                | later  |
 | 4   | Incremental sync via logical replication                                                                                                                                    | later  |
@@ -158,7 +158,7 @@ diverged branches, a custom CoW storage engine, non-Postgres sources.
 4. Graph & closure: FK graph merged with declared relations
 5. Subset ordering: topological load order
 6. DDL & load: schema auto-create, COPY into staging, upsert merge
-7. `_tributary` state: checkpoints and resume
+7. `_tributary` state: a run log
 8. Safety guards: read-only source txn, source≠target, allowlist
 9. CLI: `inspect`, `plan`, `sync`, `config`
 10. AI: `ai` command on the Vercel AI SDK, with plan confirmation
@@ -175,28 +175,41 @@ and the phase-2 upsert / schema auto-create notes.
 
 Decisions made while building, superseding the tables above where they differ:
 
-- **No COPY.** Rows are read with every pg type parser disabled, so values
-  are Postgres's own text output, and written back as untyped parameters
-  in batched `INSERT … ON CONFLICT (pk) DO UPDATE` statements, which the
-  target parses with its input functions. This keeps timestamps'
-  microseconds, bigint/numeric precision, JSON, arrays and bytea exact
-  (pg's default parsing loses some of these), needs no staging table, and
-  works over PGlite. COPY can come back later as a throughput optimization.
+- **Streamed COPY load (0.2).** The closure keeps only each row's key and
+  foreign-key columns. Per table, full rows stream `COPY (SELECT … WHERE
+  pk = ANY('{…}'::type[])) TO STDOUT` → `COPY … FROM STDIN`, in chunks of
+  50k keys inlined as escaped array literals (COPY can't take bind
+  parameters), inside the same read-only snapshot the subset was computed
+  in. Both connections pin DateStyle/IntervalStyle/extra_float_digits/
+  TimeZone so text values round-trip exactly. A table the sync created is
+  copied straight in; otherwise rows go to a temp staging table and one
+  `INSERT … SELECT … ON CONFLICT DO UPDATE … WHERE (cols::text) IS DISTINCT
+  FROM (EXCLUDED.cols::text)` rewrites only changed rows (compared as text:
+  json/point/xml have no `=`, and `=` hides numeric-scale or citext-case
+  changes). The source snapshot ends once the last table is copied, before
+  backfill, so it doesn't hold back vacuum. Every load transaction uses `SET
+  LOCAL synchronous_commit = off`; changed tables are `ANALYZE`d (a failed
+  ANALYZE is a warning). Measured
+  on 1M rows: first sync 12.0s → 8.8s, WAL 273 → 171 MB, client memory
+  1.1 GB → 0.7 GB; an unchanged re-sync writes 0 rows (59 MB WAL, row
+  locks only) instead of rewriting all of them.
 - **Exact column types.** `inspect` records each column's `format_type()`
   (`sqlType`), and auto-created target tables use it verbatim instead of
   rebuilding type names from information_schema.
 - **Deferred columns generalize self-references.** A real FK is loaded
   NULL and backfilled after all tables when it's a self-reference, a
   configured or auto-applied cycle break, or a constraint hidden by an
-  `ignore` relation. Load order comes from catalog constraints only,
+  `ignore` relation. The merge never touches these columns; backfill sets
+  every subset row's value to the source's, or NULL where the referenced
+  row is outside the subset, so re-syncs follow source changes. Load order comes from catalog constraints only,
   restricted to the tables in the subset, so cycles elsewhere in the
   schema don't block a sync.
 - **One break per cycle.** When a configured dependency break already
   cuts a multi-table cycle, the walk follows that cycle's other edges
   instead of auto-breaking each one (the Go walker broke them all).
-- **Failed runs resume.** An unfinished run (interrupted _or_ failed)
-  resumes from its completed tables; only a completed run or `--fresh`
-  starts over.
+- **No per-table checkpoints (0.2).** A re-run after a failure streams
+  every table again; tables that loaded fine are unchanged, so the merge
+  writes nothing for them. `_tributary.runs` only logs runs.
 - **Multiple seeds.** Repeat `-t/-w` pairs; one closure covers all of
   them.
 - **Seed predicates are one statement.** They're interpolated (admin-tool
@@ -208,9 +221,8 @@ Decisions made while building, superseding the tables above where they differ:
   name (works for any role, survives poolers) and, where the role may
   read `pg_control_system()`, the cluster system identifier (catches a
   replica of the target).
-- **Resume is fingerprinted.** Each table's checkpoint stores a hash of
-  the rows it loaded; a resume only skips a table whose rows are
-  unchanged, so source edits between attempts are never left out.
+- **Deferred columns on re-sync** are never overwritten by the merge; the
+  backfill updates them only where the value differs.
 - **Enums are schema-qualified** (`schema.type`), created in their own
   schema, including enums used only as array element types.
 - **Accepted additions beyond the plan:** `config unset` and `config path`,

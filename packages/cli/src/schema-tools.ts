@@ -13,6 +13,8 @@ export interface TableMatch {
   table: string;
   schemas: string[];
   matchingColumns: string[];
+  /** Every column name, for the best few matches only. */
+  columns?: string[];
 }
 
 export interface TableDescription {
@@ -26,6 +28,8 @@ export interface TableDescription {
 }
 
 const MAX_RESULTS = 15;
+/** Matches that come with their column names, saving the model a describe_table step. */
+const WITH_COLUMNS = 3;
 
 /** The forms of a word to look for: as written, singular and plural. */
 function wordForms(word: string): string[] {
@@ -88,19 +92,17 @@ export function schemaTools(catalog: Schema) {
             }
           }
         }
-        return score
-          ? [
-              {
-                score,
-                match: { table: g.name, schemas: g.schemas, matchingColumns: [...matchingColumns] },
-              },
-            ]
-          : [];
+        return score ? [{ score, group: g, matchingColumns: [...matchingColumns] }] : [];
       });
       return scored
         .sort((a, b) => b.score - a.score)
         .slice(0, MAX_RESULTS)
-        .map((s) => s.match);
+        .map(({ group, matchingColumns }, i) => ({
+          table: group.name,
+          schemas: group.schemas,
+          matchingColumns,
+          ...(i < WITH_COLUMNS && { columns: group.table.columns.map((c) => c.name) }),
+        }));
     },
 
     /** One table: "schema.table", or a bare name (described from its first schema). */

@@ -91,7 +91,7 @@ export async function computeClosure(
     requirePrimaryKey(graph, seed.table);
     const seedRows = await querySingleStatement(
       db,
-      `SELECT * FROM ${qualified(seed.table)} WHERE (${seed.where})`,
+      `SELECT ${selectList(neededColumns(graph, seed.table))} FROM ${qualified(seed.table)} WHERE (${seed.where})`,
     );
     for (const row of seedRows.rows)
       walker.discover({ table: seed.table, row, reach: "downstream" }, frontier);
@@ -107,6 +107,42 @@ export async function computeClosure(
   return walker.closure;
 }
 
+/**
+ * The columns the walk and the later load need from a table's rows: its
+ * primary key, the columns of every relation it takes part in (either
+ * direction, polymorphic discriminators included), and all its real
+ * foreign key columns (the load backfills deferred ones from these). The
+ * rest of each row stays in the database until it's streamed by COPY, so
+ * the closure stays small however wide or numerous the rows are.
+ */
+export function neededColumns(graph: Graph, table: NodeId): string[] {
+  const t = graph.table(table);
+  if (!t) return [];
+  const needed = new Set(t.primaryKey);
+  for (const e of graph.outgoing(table)) {
+    for (const c of e.fromColumns) needed.add(c);
+    if (e.kind === "polymorphic") needed.add(e.typeColumn);
+  }
+  for (const e of graph.incoming(table)) for (const c of e.toColumns) needed.add(c);
+  for (const { edge, typeValue } of graph.polymorphicIncoming(table)) {
+    for (const c of edge.targets[typeValue]!.toColumns) needed.add(c);
+  }
+  for (const fk of t.foreignKeys) for (const c of fk.fromColumns) needed.add(c);
+  // Columns every real FK onto this table references, including ones an
+  // `ignore` relation hid from the walk: backfill matches against them.
+  for (const other of graph.tables.values()) {
+    for (const fk of other.foreignKeys) {
+      if (fk.toTable === table) for (const c of fk.toColumns) needed.add(c);
+    }
+  }
+  // In the table's own column order, for stable output.
+  return t.columns.map((c) => c.name).filter((c) => needed.has(c));
+}
+
+function selectList(columns: string[]): string {
+  return columns.map(ident).join(", ");
+}
+
 function requirePrimaryKey(graph: Graph, table: NodeId): string[] {
   const pk = graph.table(table)?.primaryKey ?? [];
   if (pk.length === 0) {
@@ -118,6 +154,17 @@ function requirePrimaryKey(graph: Graph, table: NodeId): string[] {
 class Walker {
   readonly closure: Closure = { rows: new Map(), breaks: [], warnings: [] };
   private readonly reach = new Map<string, Reach>();
+  private readonly needed = new Map<NodeId, string[]>();
+
+  columnsOf(table: NodeId): string[] {
+    let columns = this.needed.get(table);
+    if (!columns) {
+      columns = neededColumns(this.graph, table);
+      this.needed.set(table, columns);
+    }
+    return columns;
+  }
+
   /** Broken edges, by columnId of each of their from-columns. */
   private readonly broken = new Set<string>();
 
@@ -326,10 +373,10 @@ class Walker {
         where += ` AND ${ident(filter.column)} = $${params.length}`;
       }
       const result = await this.db.query(
-        `SELECT * FROM ${qualified(table)} WHERE ${where}`,
+        `SELECT ${selectList(this.columnsOf(table))} FROM ${qualified(table)} WHERE ${where}`,
         params,
       );
-      rows.push(...result.rows);
+      for (const row of result.rows) rows.push(row); // can be far too many to spread as arguments
     }
     return rows;
   }

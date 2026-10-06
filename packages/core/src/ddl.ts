@@ -25,7 +25,8 @@ export interface SchemaReport {
  * altered. Everything created happens in one transaction.
  *
  * Not replicated: defaults, sequences/identity, check constraints,
- * indexes beyond the primary key, triggers, views.
+ * indexes beyond the primary key (and the unique keys foreign keys need),
+ * triggers, views.
  */
 export async function ensureSchema(
   target: Queryable,
@@ -72,6 +73,8 @@ export async function ensureSchema(
       report.tablesCreated.push(tableId(t));
       existing.set(tableId(t), t);
     }
+    const created = new Set(report.tablesCreated);
+    const uniqueKeys = new Set<string>();
     for (const t of missing) {
       for (const fk of t.foreignKeys) {
         if (!existing.has(fk.toTable)) {
@@ -80,14 +83,46 @@ export async function ensureSchema(
           );
           continue;
         }
-        await target.query(
-          `ALTER TABLE ${qualified(fk.fromTable)} ADD CONSTRAINT ${ident(fk.constraintName)} FOREIGN KEY (${fk.fromColumns.map(ident).join(", ")}) REFERENCES ${qualified(fk.toTable)} (${fk.toColumns.map(ident).join(", ")})`,
-        );
+        // A foreign key onto columns other than the primary key needs a
+        // unique constraint on them, which a table created here lacks.
+        const parent = existing.get(fk.toTable)!;
+        const key = `${fk.toTable}\0${columnSet(fk.toColumns)}`;
+        if (
+          created.has(fk.toTable) &&
+          columnSet(fk.toColumns) !== columnSet(parent.primaryKey) &&
+          !uniqueKeys.has(key)
+        ) {
+          await target.query(
+            `ALTER TABLE ${qualified(fk.toTable)} ADD UNIQUE (${fk.toColumns.map(ident).join(", ")})`,
+          );
+          uniqueKeys.add(key);
+        }
+        // A table already on the target may lack the unique key the foreign
+        // key needs; that skips the constraint instead of the whole schema.
+        await target.query("SAVEPOINT tributary_fk");
+        try {
+          await target.query(
+            `ALTER TABLE ${qualified(fk.fromTable)} ADD CONSTRAINT ${ident(fk.constraintName)} FOREIGN KEY (${fk.fromColumns.map(ident).join(", ")}) REFERENCES ${qualified(fk.toTable)} (${fk.toColumns.map(ident).join(", ")})`,
+          );
+        } catch (e) {
+          if ((e as { code?: string }).code !== "42830") throw e;
+          await target.query("ROLLBACK TO SAVEPOINT tributary_fk");
+          report.warnings.push(
+            `did not create foreign key ${fk.constraintName} (${fk.fromTable} -> ${fk.toTable}): ${fk.toTable} on target has no unique key on (${fk.toColumns.join(", ")})`,
+          );
+          continue;
+        }
+        await target.query("RELEASE SAVEPOINT tributary_fk");
         report.constraintsCreated.push(fk.constraintName);
       }
     }
   });
   return report;
+}
+
+/** A key's columns, independent of order: Postgres matches unique keys by column set. */
+function columnSet(columns: string[]): string {
+  return [...columns].sort().join("\0");
 }
 
 /**

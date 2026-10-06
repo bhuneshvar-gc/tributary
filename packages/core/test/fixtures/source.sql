@@ -143,3 +143,29 @@ CREATE TABLE enum_array_table (
     id    int PRIMARY KEY,
     moods mood[] NOT NULL
 );
+
+-- Text primary keys with characters that need escaping in an array literal.
+CREATE TABLE text_key_table (
+    id text PRIMARY KEY,
+    v  text
+);
+
+-- Types with no equality operator (json, point, xml, arrays of them).
+CREATE TABLE no_equality_table (
+    id    int PRIMARY KEY,
+    doc   json,
+    at    point,
+    docs  json[],
+    n     numeric,
+    x     xml
+);
+
+-- A foreign key onto a unique column that isn't the primary key.
+CREATE TABLE code_parent_table (
+    id   int PRIMARY KEY,
+    code text UNIQUE NOT NULL
+);
+CREATE TABLE code_child_table (
+    id          int PRIMARY KEY,
+    parent_code text REFERENCES code_parent_table(code)
+);

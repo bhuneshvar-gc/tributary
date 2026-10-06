@@ -281,6 +281,69 @@ describe("generateCommand", () => {
     expect(sent).not.toContain("tool-result");
   });
 
+  test("the model's earlier reasoning isn't re-sent on later steps", async () => {
+    const thinking = "LONG CHAIN OF THOUGHT ".repeat(50);
+    const model = new MockLanguageModelV4({
+      doGenerate: [
+        {
+          ...toolCall("1", "search_tables", { query: "users" }),
+          content: [
+            { type: "reasoning" as const, text: thinking },
+            {
+              type: "tool-call" as const,
+              toolCallId: "1",
+              toolName: "search_tables",
+              input: '{"query":"users"}',
+            },
+          ],
+        },
+        submit("2", plan),
+      ],
+    });
+
+    await generateCommand(model, "preview the user a@b.co", schema);
+
+    const second = JSON.stringify(model.doGenerateCalls[1]!.prompt);
+    expect(second).not.toContain("LONG CHAIN OF THOUGHT");
+    expect(second).toContain("search_tables"); // the lookup itself is kept
+  });
+
+  test("a model that never answers times out with a clear error instead of hanging", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: ({ abortSignal }) =>
+        new Promise((_, reject) =>
+          abortSignal?.addEventListener("abort", () => reject(abortSignal.reason)),
+        ),
+    });
+
+    await expect(generateCommand(model, "anything", schema, { timeoutMs: 200 })).rejects.toThrow(
+      /the model didn't finish within 0\.2s/,
+    );
+  });
+
+  test("the time limit holds even when the provider ignores cancellation", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: () => new Promise(() => {}) });
+
+    const started = Date.now();
+    await expect(generateCommand(model, "anything", schema, { timeoutMs: 300 })).rejects.toThrow(
+      /didn't finish within 0\.3s/,
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("reports each step as it finishes", async () => {
+    const model = new MockLanguageModelV4({
+      doGenerate: [toolCall("1", "search_tables", { query: "users" }), submit("2", plan)],
+    });
+    const steps: string[] = [];
+
+    await generateCommand(model, "preview the user a@b.co", schema, {
+      onStep: (s) => steps.push(`${s.step}:${s.tools.join(",")}:${s.inputTokens}`),
+    });
+
+    expect(steps).toEqual(["1:search_tables:1000", "2:submit_command:1500"]);
+  });
+
   test("stops at the token cap instead of exploring forever", async () => {
     const model = new MockLanguageModelV4({
       doGenerate: Array.from({ length: 10 }, (_, i) => ({

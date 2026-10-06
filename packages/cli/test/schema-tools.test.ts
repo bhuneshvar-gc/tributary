@@ -61,7 +61,7 @@ describe("listSchemas", () => {
 
 describe("searchTables", () => {
   test("identical tenant copies collapse into one result naming their schemas", () => {
-    expect(tools.searchTables("line items")).toEqual([
+    expect(tools.searchTables("line items")).toMatchObject([
       {
         table: "order_management_v2_order_line_items",
         schemas: ["agratas", "unilever"],
@@ -72,7 +72,7 @@ describe("searchTables", () => {
 
   test("a copy whose columns differ is its own result", () => {
     const results = tools.searchTables("orders");
-    expect(results.filter((r) => r.table === "order_management_v2_orders")).toEqual([
+    expect(results.filter((r) => r.table === "order_management_v2_orders")).toMatchObject([
       {
         table: "order_management_v2_orders",
         schemas: ["agratas", "unilever"],
@@ -84,13 +84,24 @@ describe("searchTables", () => {
 
   test("matches column names too, ranking table-name matches first", () => {
     const results = tools.searchTables("user email");
-    expect(results[0]).toEqual({ table: "users", schemas: ["public"], matchingColumns: ["email"] });
+    expect(results[0]).toMatchObject({
+      table: "users",
+      schemas: ["public"],
+      matchingColumns: ["email"],
+    });
     expect(results.map((r) => r.table)).toContain("order_management_v2_orders"); // created_by_user_id
   });
 
   test("plural and singular words match alike, case-insensitively", () => {
     expect(tools.searchTables("Companies")[0]?.table).toBe("companies");
     expect(tools.searchTables("company")[0]?.table).toBe("companies");
+  });
+
+  test("the top 3 matches include their column names, so a describe is often unnecessary", () => {
+    const results = tools.searchTables("orders");
+    expect(results.slice(0, 3).every((r) => Array.isArray(r.columns))).toBe(true);
+    expect(results[0]!.columns).toContain("order_id");
+    expect(results.slice(3).every((r) => r.columns === undefined)).toBe(true);
   });
 
   test("returns at most 15 results", () => {

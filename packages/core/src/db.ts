@@ -47,6 +47,12 @@ export async function connect(url: string): Promise<pg.Client> {
   // in-flight query rejects as well, so that's where they're reported.
   client.on("error", () => {});
   await client.connect();
+  // Values move between databases as text (row data and COPY streams), so
+  // both ends format them the same, unambiguous way: ISO dates, UTC
+  // timestamps, round-trip-exact floats and standard intervals.
+  await client.query(
+    "SET DateStyle = 'ISO, MDY'; SET IntervalStyle = 'postgres'; SET extra_float_digits = 3; SET TimeZone = 'UTC'",
+  );
   return client;
 }
 

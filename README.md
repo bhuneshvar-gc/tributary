@@ -27,7 +27,8 @@ Every run is spelled out on the command line:
 ```sh
 tributary plan -t users -w "email = 'admin@example.com'" --source prod            # row counts, writes nothing
 tributary sync -t users -w "email = 'admin@example.com'" --source prod --target local
-tributary sync -t users -w "id = 42" -t feature_flags -w true --source prod --target local   # several seeds
+tributary sync -t users -w "id = 42" -t feature_flags --source prod --target local   # several seeds
+# each -w filters the -t just before it; a -t with no (or an empty) -w takes every row
 tributary ai "copy the user admin@example.com and their orders" --source prod --target local
 ```
 
@@ -99,12 +100,23 @@ Nothing installs unless you run it. Turn the check off with
   needs. By default (`--traversal downstream`) a parent pulled in only to satisfy a
   foreign key isn't used to fan back out to its other children. `--traversal full`
   fans out from every row.
-- **Re-runs upsert.** A row that's already on the target is updated to match the
-  source. `--fresh` deletes exactly the subset's rows first (never a TRUNCATE).
-- **Resume.** Each table commits with its checkpoint in the target's `_tributary`
-  schema, so an interrupted or failed sync continues where it stopped. A table is
-  only skipped if its rows are unchanged since; one whose source rows changed is
-  reloaded.
+- **Bulk load, built for low load.** Rows stream from source `COPY` straight into target
+  `COPY`, never parsed by Tributary, so memory holds only each row's key columns. A
+  table Tributary creates is copied straight in; an existing one is staged and merged
+  on its primary key. Load transactions skip waiting on WAL flushes (`synchronous_commit
+  = off`, safe for any user), and loaded tables are `ANALYZE`d.
+- **Re-syncs write only what changed.** A row already on the target with the same
+  values is not rewritten (no new row version, almost no WAL), so a repeat sync of
+  unchanged data costs the target close to nothing. `--fresh` deletes exactly the
+  subset's rows first (never a TRUNCATE).
+- **Live progress.** At a terminal, `plan` and `sync` show each step as it happens
+  (reading the schema, collecting the subset, then each table: rows copied so far
+  of the total, merging, written vs unchanged), with that step's elapsed time and
+  the total. Finished steps stay on screen with how long they took, and the summary
+  ends with the total time. `--json` output carries `durationMs`.
+- **Re-running after a failure** streams every table again; tables that loaded fine
+  are unchanged, so they cost reads but almost no writes. Each run is logged in the
+  target's `_tributary.runs`.
 - **Schema auto-create.** Missing target tables are created with the source's exact
   column types, NOT NULL, primary keys, foreign keys and enum types (in their own
   schemas, including enums only used in arrays). Defaults,
@@ -157,7 +169,7 @@ exported for lower-level use.
 
 ```sh
 pnpm install
-pnpm test        # unit + integration; Postgres runs in-process via PGlite, no Docker
+pnpm test        # unit + integration against a throwaway local Postgres (needs initdb/pg_ctl on PATH, or PG_BIN)
 pnpm typecheck && pnpm lint && pnpm build
 ```
 
